@@ -1,0 +1,116 @@
+name: Human Go/No-Go Feedback
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_context:
+        description: 'Target work context identifier'
+        required: true
+        type: string
+      target_ref:
+        description: 'Target ref, branch, or execution surface'
+        required: true
+        type: string
+      decision:
+        description: 'Human disposition for the next iteration'
+        required: true
+        type: choice
+        options:
+          - go
+          - nogo
+      feedback:
+        description: 'Free-form human feedback for the next iteration'
+        required: true
+        type: string
+      related_issue_url:
+        description: 'Optional related issue URL'
+        required: false
+        type: string
+      related_pull_request_url:
+        description: 'Optional related pull request URL'
+        required: false
+        type: string
+      target_run_id:
+        description: 'Optional related workflow run id'
+        required: false
+        type: string
+      evidence_url:
+        description: 'Optional supporting evidence URL'
+        required: false
+        type: string
+      recorded_by:
+        description: 'Optional recorder identity override'
+        required: false
+        type: string
+      transcribed_for:
+        description: 'Optional human identity when transcribing feedback'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  human-go-no-go-feedback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: node tools/npm/cli.mjs ci --ignore-scripts
+
+      - name: Record human go/no-go decision
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          args=(
+            "tools/priority/human-go-no-go-feedback.mjs"
+            "--repo" "${{ github.repository }}"
+            "--target-context" "${{ inputs.target_context }}"
+            "--target-ref" "${{ inputs.target_ref }}"
+            "--decision" "${{ inputs.decision }}"
+            "--feedback" "${{ inputs.feedback }}"
+            "--out" "tests/results/_agent/handoff/human-go-no-go-decision.json"
+            "--events-out" "tests/results/_agent/handoff/human-go-no-go-events.ndjson"
+            "--step-summary" "$GITHUB_STEP_SUMMARY"
+          )
+
+          if [[ -n "${{ inputs.related_issue_url }}" ]]; then
+            args+=("--issue-url" "${{ inputs.related_issue_url }}")
+          fi
+          if [[ -n "${{ inputs.related_pull_request_url }}" ]]; then
+            args+=("--pull-request-url" "${{ inputs.related_pull_request_url }}")
+          fi
+          if [[ -n "${{ inputs.target_run_id }}" ]]; then
+            args+=("--target-run-id" "${{ inputs.target_run_id }}")
+          fi
+          if [[ -n "${{ inputs.evidence_url }}" ]]; then
+            args+=("--evidence-url" "${{ inputs.evidence_url }}")
+          fi
+          if [[ -n "${{ inputs.recorded_by }}" ]]; then
+            args+=("--recorded-by" "${{ inputs.recorded_by }}")
+          fi
+          if [[ -n "${{ inputs.transcribed_for }}" ]]; then
+            args+=("--transcribed-for" "${{ inputs.transcribed_for }}")
+          fi
+
+          node "${args[@]}"
+
+      - name: Upload human go/no-go decision artifacts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: human-go-no-go-decision
+          path: |
+            tests/results/_agent/handoff/human-go-no-go-decision.json
+            tests/results/_agent/handoff/human-go-no-go-events.ndjson
+          if-no-files-found: error
