@@ -38,6 +38,12 @@ test('parseArgs preserves the generic runtime surface', () => {
   assert.equal(parsed.leaseScope, 'workspace');
 });
 
+test('sanitizeSegment trims edge hyphens without regex backtracking', async () => {
+  const { __test } = await import('../index.mjs');
+  assert.equal(__test.sanitizeSegment('  ---lane id---  '), 'lane-id');
+  assert.equal(__test.sanitizeSegment('---'), 'runtime');
+});
+
 test('runRuntimeSupervisor executes through an injected adapter', async () => {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'runtime-harness-core-'));
   const adapterCalls = [];

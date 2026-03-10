@@ -71,11 +71,23 @@ function toIso(now = new Date()) {
   return now.toISOString();
 }
 
+function trimEdgeHyphens(value) {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === '-') {
+    start += 1;
+  }
+  while (end > start && value[end - 1] === '-') {
+    end -= 1;
+  }
+  return value.slice(start, end);
+}
+
 function sanitizeSegment(value) {
-  return String(value || '')
+  const normalized = String(value || '')
     .trim()
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'runtime';
+    .replace(/[^A-Za-z0-9._-]+/g, '-');
+  return trimEdgeHyphens(normalized) || 'runtime';
 }
 
 function makeTurnFileName(now, cycle) {
@@ -998,5 +1010,6 @@ export const __test = {
   buildLaneRecord,
   buildEmptyState,
   makeTurnFileName,
-  resolveRuntimePaths
+  resolveRuntimePaths,
+  sanitizeSegment
 };
