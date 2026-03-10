@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildDesiredLabels, buildMirrorBody, parseArgs } from '../mirror-fork-issue.mjs';
+import { buildDesiredLabels, buildMirrorBody, buildStandingLabelDemotions, parseArgs } from '../mirror-fork-issue.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -36,6 +36,25 @@ test('buildMirrorBody prefixes the upstream issue pointer exactly once', () => {
 test('buildDesiredLabels keeps the fork standing label and reuses only labels present on the fork repo', () => {
   const labels = buildDesiredLabels(['ci', 'standing-priority', 'governance'], ['ci', 'fork-standing-priority']);
   assert.deepEqual(labels, ['ci', 'fork-standing-priority']);
+});
+
+test('buildStandingLabelDemotions removes stale open standing labels from non-target fork issues', () => {
+  const demotions = buildStandingLabelDemotions(
+    [
+      { number: 300, state: 'OPEN', labels: [{ name: 'fork-standing-priority' }, { name: 'enhancement' }] },
+      { number: 301, state: 'OPEN', labels: ['fork-standing-priority', 'ci', 'standing-priority'] },
+      { number: 305, state: 'OPEN', labels: ['fork-standing-priority', 'bug'] },
+      { number: 299, state: 'OPEN', labels: ['standing-priority'] },
+      { number: 250, state: 'CLOSED', labels: ['fork-standing-priority', 'governance'] }
+    ],
+    305
+  );
+
+  assert.deepEqual(demotions, [
+    { number: 300, labels: ['enhancement'] },
+    { number: 301, labels: ['ci'] },
+    { number: 299, labels: [] }
+  ]);
 });
 
 test('mirror-fork-issue uses supported gh label list lookup instead of gh label view', () => {

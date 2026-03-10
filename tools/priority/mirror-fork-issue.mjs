@@ -66,6 +66,11 @@ function stripExistingPointer(body) {
   return String(body || '').replace(/^<!--\s*upstream-issue-url:[\s\S]*?-->\s*/i, '').trim();
 }
 
+function normalizeLabelName(entry) {
+  const raw = typeof entry === 'string' ? entry : entry?.name;
+  return String(raw || '').trim().toLowerCase();
+}
+
 export function buildMirrorBody(upstreamIssue) {
   const pointer = `${POINTER_PREFIX}${upstreamIssue.url} -->`;
   const strippedBody = stripExistingPointer(upstreamIssue.body);
@@ -73,10 +78,10 @@ export function buildMirrorBody(upstreamIssue) {
 }
 
 export function buildDesiredLabels(upstreamLabels = [], existingForkLabels = []) {
-  const existing = new Set(existingForkLabels.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean));
+  const existing = new Set(existingForkLabels.map((entry) => normalizeLabelName(entry)).filter(Boolean));
   const labels = new Set(['fork-standing-priority']);
   for (const label of upstreamLabels) {
-    const normalized = String(label || '').trim().toLowerCase();
+    const normalized = normalizeLabelName(label);
     if (!normalized || STANDING_LABELS.has(normalized)) {
       continue;
     }
@@ -85,6 +90,24 @@ export function buildDesiredLabels(upstreamLabels = [], existingForkLabels = [])
     }
   }
   return Array.from(labels).sort();
+}
+
+export function buildStandingLabelDemotions(forkIssues = [], targetIssueNumber) {
+  const target = Number.parseInt(targetIssueNumber, 10);
+  return (forkIssues || [])
+    .filter((issue) => String(issue?.state || '').trim().toUpperCase() === 'OPEN')
+    .map((issue) => ({
+      number: Number.parseInt(issue?.number, 10),
+      labels: Array.isArray(issue?.labels)
+        ? issue.labels.map((entry) => normalizeLabelName(entry)).filter(Boolean)
+        : []
+    }))
+    .filter((issue) => Number.isFinite(issue.number) && issue.number !== target)
+    .filter((issue) => issue.labels.some((label) => STANDING_LABELS.has(label)))
+    .map((issue) => ({
+      number: issue.number,
+      labels: issue.labels.filter((label) => !STANDING_LABELS.has(label)).sort()
+    }));
 }
 
 function ghApi(repoRoot, endpoint, method, payload) {
@@ -196,6 +219,13 @@ export function runMirrorForkIssue({
     });
   }
 
+  const standingDemotions = buildStandingLabelDemotions(forkIssues, forkIssue.number);
+  for (const demotion of standingDemotions) {
+    ghApi(repoRoot, `repos/${forkSlug}/issues/${demotion.number}`, 'PATCH', {
+      labels: demotion.labels
+    });
+  }
+
   const reportDir = path.isAbsolute(options.reportDir) ? options.reportDir : path.join(repoRoot, options.reportDir);
   const reportPath = path.join(reportDir, `fork-issue-mirror-${forkRemote}-${options.issue}.json`);
   const report = {
@@ -213,6 +243,7 @@ export function runMirrorForkIssue({
       issueUrl: forkIssue.html_url ?? forkIssue.url ?? null
     },
     labels: desiredLabels,
+    standingDemotions,
     action: existingMirror?.number ? 'updated' : 'created'
   };
   mkdirSync(reportDir, { recursive: true });
