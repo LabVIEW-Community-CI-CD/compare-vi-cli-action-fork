@@ -1,15 +1,35 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { getRepoRoot } from './lib/branch-utils.mjs';
-import { resolveActiveForkRemoteName } from './lib/remote-utils.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { getRepoRoot, run } from './lib/branch-utils.mjs';
+import {
+  buildCreatePullRequestMutation,
+  buildRepositorySlug,
+  ensureGhCli,
+  extractPullRequestFromMutation,
+  loadRepositoryGraphMetadata,
+  resolveActiveForkRemoteName,
+  runGhGraphql,
+  runGhJson,
+  tryResolveRemote
+} from './lib/remote-utils.mjs';
 
 const DEFAULT_REPORT_PATH = path.join('tests', 'results', '_agent', 'issue', 'develop-sync-report.json');
 const SUPPORTED_FORK_REMOTES = new Set(['origin', 'personal']);
+const PROTECTED_BRANCH_PATTERNS = [
+  /GH013/i,
+  /protected branch/i,
+  /Changes must be made through a pull request/i,
+  /Changes must be made through the merge queue/i,
+  /required status checks/i
+];
+const DEFAULT_MERGE_WAIT_POLL_MS = 15000;
+const DEFAULT_MERGE_WAIT_MAX_POLLS = 120;
 
 function printUsage() {
   console.log('Usage: node tools/priority/develop-sync.mjs [options]');
@@ -86,11 +106,352 @@ export function buildPwshArgs({ repoRoot, remote, parityReportPath }) {
   ];
 }
 
-export function runDevelopSync({
+function emitCapturedOutput(result, {
+  stdoutStream = process.stdout,
+  stderrStream = process.stderr
+} = {}) {
+  const stdoutText = String(result?.stdout ?? '');
+  const stderrText = String(result?.stderr ?? '');
+  if (stdoutText) {
+    stdoutStream.write(stdoutText);
+  }
+  if (stderrText) {
+    stderrStream.write(stderrText);
+  }
+}
+
+function captureResultText(result) {
+  const parts = [];
+  const stdoutText = String(result?.stdout ?? '').trim();
+  const stderrText = String(result?.stderr ?? '').trim();
+  if (stdoutText) {
+    parts.push(stdoutText);
+  }
+  if (stderrText) {
+    parts.push(stderrText);
+  }
+  return parts.join('\n').trim();
+}
+
+export function isProtectedBranchSyncFailure(text = '') {
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    return false;
+  }
+  return PROTECTED_BRANCH_PATTERNS.filter((pattern) => pattern.test(normalized)).length >= 2;
+}
+
+export function buildProtectedSyncBranchName(remote, branch, headSha) {
+  const normalizedRemote = String(remote || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-');
+  const normalizedBranch = String(branch || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-');
+  const shortSha = String(headSha || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-f0-9]+/g, '')
+    .slice(0, 12);
+  if (!normalizedRemote || !normalizedBranch || shortSha.length === 0) {
+    throw new Error('Unable to build protected sync branch name from the current remote/branch/SHA.');
+  }
+  return `sync/${normalizedRemote}-${normalizedBranch}-${shortSha}`;
+}
+
+export function buildProtectedSyncPrTitle(remote, branch, headSha) {
+  const shortSha = String(headSha || '').trim().slice(0, 12);
+  return `[sync] ${remote}/${branch} <= upstream/${branch} (${shortSha})`;
+}
+
+export function buildProtectedSyncPrBody(remote, branch, headSha) {
+  const shortSha = String(headSha || '').trim().slice(0, 12);
+  return [
+    '## Summary',
+    `- Sync \`${remote}/${branch}\` to \`upstream/${branch}\` at \`${shortSha}\`.`,
+    '',
+    '## Testing',
+    `- node tools/npm/run-script.mjs priority:develop:sync -- --fork-remote ${remote}`
+  ].join('\n');
+}
+
+export function buildMergeSummaryPath(repoRoot, remote) {
+  return path.join(repoRoot, 'tests', 'results', '_agent', 'issue', `${remote}-develop-sync-merge-summary.json`);
+}
+
+export function resolveForkRepository(repoRoot, remote, tryResolveRemoteFn = tryResolveRemote) {
+  const resolved = tryResolveRemoteFn(repoRoot, remote);
+  if (!resolved?.parsed) {
+    throw new Error(`Unable to resolve git remote '${remote}'.`);
+  }
+  return resolved.parsed;
+}
+
+function runCapturedCommand(command, args, {
+  cwd,
+  spawnSyncFn = spawnSync,
+  allowFailure = false,
+  inheritOutput = true
+} = {}) {
+  const result = spawnSyncFn(command, args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  if (inheritOutput) {
+    emitCapturedOutput(result);
+  }
+  if (!allowFailure && result.status !== 0) {
+    const diagnostic = captureResultText(result) || `exit ${result.status}`;
+    throw new Error(`${command} ${args.join(' ')} failed: ${diagnostic}`);
+  }
+  return result;
+}
+
+export function findExistingProtectedSyncPr({
+  repoRoot,
+  repository,
+  syncBranch,
+  branch,
+  runGhJsonFn = runGhJson
+}) {
+  const pulls = runGhJsonFn(
+    repoRoot,
+    [
+      'pr',
+      'list',
+      '--repo',
+      buildRepositorySlug(repository),
+      '--state',
+      'open',
+      '--head',
+      syncBranch,
+      '--base',
+      branch,
+      '--json',
+      'number,url,state,headRefName,baseRefName'
+    ]
+  );
+  return Array.isArray(pulls) && pulls.length > 0 ? pulls[0] : null;
+}
+
+export function createProtectedSyncPr({
+  repoRoot,
+  repository,
+  syncBranch,
+  branch,
+  title,
+  body,
+  loadRepositoryGraphMetadataFn = loadRepositoryGraphMetadata,
+  runGhGraphqlFn = runGhGraphql
+}) {
+  const metadata = loadRepositoryGraphMetadataFn(repoRoot, repository, { runGhGraphqlFn });
+  const request = buildCreatePullRequestMutation({
+    repositoryId: metadata.id,
+    headRefName: syncBranch,
+    baseRefName: branch,
+    title,
+    body
+  });
+  const payload = runGhGraphqlFn(repoRoot, request.query, request.variables);
+  const pullRequest = extractPullRequestFromMutation(payload);
+  if (!pullRequest?.number || !pullRequest?.url) {
+    throw new Error(`Protected sync PR creation returned no pull request for ${buildRepositorySlug(repository)}.`);
+  }
+  console.log(pullRequest.url);
+  return pullRequest;
+}
+
+export async function waitForProtectedSyncPrMerged({
+  repoRoot,
+  repository,
+  prNumber,
+  pollIntervalMs = DEFAULT_MERGE_WAIT_POLL_MS,
+  maxPolls = DEFAULT_MERGE_WAIT_MAX_POLLS,
+  runGhJsonFn = runGhJson,
+  sleepFn = delay
+}) {
+  for (let poll = 1; poll <= maxPolls; poll += 1) {
+    const pr = runGhJsonFn(
+      repoRoot,
+      [
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        buildRepositorySlug(repository),
+        '--json',
+        'number,url,state,mergedAt,headRefName,baseRefName,mergeStateStatus,mergeable,autoMergeRequest'
+      ]
+    );
+    const state = String(pr?.state ?? '').trim().toUpperCase();
+    if (pr?.mergedAt || state === 'MERGED') {
+      return pr;
+    }
+    if (state === 'CLOSED') {
+      throw new Error(`Protected sync PR #${prNumber} closed without merge.`);
+    }
+    if (poll < maxPolls) {
+      await sleepFn(pollIntervalMs);
+    }
+  }
+
+  throw new Error(`Timed out waiting for protected sync PR #${prNumber} to merge.`);
+}
+
+function verifyParityReport(parityReportPath, readFileSyncFn = readFileSync) {
+  const payload = JSON.parse(readFileSyncFn(parityReportPath, 'utf8'));
+  const tipDiffCount = Number(payload?.tipDiff?.fileCount ?? Number.NaN);
+  if (!Number.isInteger(tipDiffCount)) {
+    throw new Error(`Parity report at ${parityReportPath} is missing tipDiff.fileCount.`);
+  }
+  if (tipDiffCount !== 0) {
+    throw new Error(`Origin/upstream parity failed: tipDiff.fileCount=${tipDiffCount} (expected 0).`);
+  }
+  return payload;
+}
+
+export async function runProtectedForkSync({
+  repoRoot,
+  remote,
+  branch = 'develop',
+  parityReportPath,
+  runFn = run,
+  ensureGhCliFn = ensureGhCli,
+  runGhJsonFn = runGhJson,
+  runGhGraphqlFn = runGhGraphql,
+  loadRepositoryGraphMetadataFn = loadRepositoryGraphMetadata,
+  tryResolveRemoteFn = tryResolveRemote,
+  spawnSyncFn = spawnSync,
+  readFileSyncFn = readFileSync,
+  sleepFn = delay
+}) {
+  ensureGhCliFn();
+  const repository = resolveForkRepository(repoRoot, remote, tryResolveRemoteFn);
+  const repositorySlug = buildRepositorySlug(repository);
+  const localHead = runFn('git', ['rev-parse', `refs/heads/${branch}`], { cwd: repoRoot });
+  const syncBranch = buildProtectedSyncBranchName(remote, branch, localHead);
+  const syncRefspec = `refs/heads/${branch}:refs/heads/${syncBranch}`;
+
+  runFn('git', ['push', '--force-with-lease', remote, syncRefspec], { cwd: repoRoot });
+
+  let pullRequest = findExistingProtectedSyncPr({
+    repoRoot,
+    repository,
+    syncBranch,
+    branch,
+    runGhJsonFn
+  });
+  let created = false;
+  if (!pullRequest) {
+    pullRequest = createProtectedSyncPr({
+      repoRoot,
+      repository,
+      syncBranch,
+      branch,
+      title: buildProtectedSyncPrTitle(remote, branch, localHead),
+      body: buildProtectedSyncPrBody(remote, branch, localHead),
+      loadRepositoryGraphMetadataFn,
+      runGhGraphqlFn
+    });
+    created = true;
+  }
+
+  runCapturedCommand(
+    'pwsh',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-File',
+      path.join(repoRoot, 'tools', 'Watch-PRChecksSafe.ps1'),
+      '-PullRequest',
+      String(pullRequest.number),
+      '-Repository',
+      repositorySlug,
+      '-RequiredOnly'
+    ],
+    {
+      cwd: repoRoot,
+      spawnSyncFn
+    }
+  );
+
+  runCapturedCommand(
+    'node',
+    [
+      path.join(repoRoot, 'tools', 'priority', 'merge-sync-pr.mjs'),
+      '--pr',
+      String(pullRequest.number),
+      '--repo',
+      repositorySlug,
+      '--keep-branch',
+      '--summary-path',
+      buildMergeSummaryPath(repoRoot, remote)
+    ],
+    {
+      cwd: repoRoot,
+      spawnSyncFn
+    }
+  );
+
+  const mergedPr = await waitForProtectedSyncPrMerged({
+    repoRoot,
+    repository,
+    prNumber: pullRequest.number,
+    runGhJsonFn,
+    sleepFn
+  });
+
+  runFn('git', ['fetch', '--all', '--prune'], { cwd: repoRoot });
+  runCapturedCommand(
+    'node',
+    [
+      path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
+      '--base-ref',
+      `upstream/${branch}`,
+      '--head-ref',
+      `${remote}/${branch}`,
+      '--output-path',
+      parityReportPath
+    ],
+    {
+      cwd: repoRoot,
+      spawnSyncFn
+    }
+  );
+  verifyParityReport(parityReportPath, readFileSyncFn);
+
+  return {
+    mode: 'protected-pull-request',
+    repository: repositorySlug,
+    syncBranch,
+    pullRequest: {
+      number: pullRequest.number,
+      url: pullRequest.url,
+      created,
+      mergedAt: mergedPr?.mergedAt ?? null
+    },
+    mergeSummaryPath: path.relative(repoRoot, buildMergeSummaryPath(repoRoot, remote)).replace(/\\/g, '/')
+  };
+}
+
+export async function runDevelopSync({
   repoRoot = getRepoRoot(),
   options = parseArgs(),
   env = process.env,
-  spawnSyncFn = spawnSync
+  spawnSyncFn = spawnSync,
+  runFn = run,
+  ensureGhCliFn = ensureGhCli,
+  runGhJsonFn = runGhJson,
+  runGhGraphqlFn = runGhGraphql,
+  loadRepositoryGraphMetadataFn = loadRepositoryGraphMetadata,
+  tryResolveRemoteFn = tryResolveRemote,
+  mkdirSyncFn = mkdirSync,
+  writeFileSyncFn = writeFileSync,
+  readFileSyncFn = readFileSync,
+  sleepFn = delay
 } = {}) {
   const remotes = resolveForkRemoteTargets(options.forkRemote, env);
   const actions = [];
@@ -98,22 +459,45 @@ export function runDevelopSync({
   for (const remote of remotes) {
     const parityReportPath = buildParityReportPath(repoRoot, remote);
     const args = buildPwshArgs({ repoRoot, remote, parityReportPath });
-    const result = spawnSyncFn('pwsh', args, {
+    const result = runCapturedCommand('pwsh', args, {
       cwd: repoRoot,
-      stdio: 'inherit',
-      encoding: 'utf8'
+      spawnSyncFn,
+      allowFailure: true
     });
+    let mode = 'direct';
+    let protectedSync = null;
     if (result.status !== 0) {
-      throw new Error(`priority:develop:sync failed for ${remote}.`);
+      const failureText = captureResultText(result);
+      if (!isProtectedBranchSyncFailure(failureText)) {
+        throw new Error(`priority:develop:sync failed for ${remote}. ${failureText}`.trim());
+      }
+      protectedSync = await runProtectedForkSync({
+        repoRoot,
+        remote,
+        branch: 'develop',
+        parityReportPath,
+        runFn,
+        ensureGhCliFn,
+        runGhJsonFn,
+        runGhGraphqlFn,
+        loadRepositoryGraphMetadataFn,
+        tryResolveRemoteFn,
+        spawnSyncFn,
+        readFileSyncFn,
+        sleepFn
+      });
+      mode = protectedSync.mode;
     }
     actions.push({
       remote,
-      parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/')
+      mode,
+      parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
+      protectedSync
     });
   }
 
   const reportPath = path.isAbsolute(options.reportPath) ? options.reportPath : path.join(repoRoot, options.reportPath);
-  mkdirSync(path.dirname(reportPath), { recursive: true });
+  mkdirSyncFn(path.dirname(reportPath), { recursive: true });
   const report = {
     schema: 'priority/develop-sync-report@v1',
     generatedAt: new Date().toISOString(),
@@ -121,17 +505,17 @@ export function runDevelopSync({
     remotes,
     actions
   };
-  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  writeFileSyncFn(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
   return { report, reportPath };
 }
 
-export function main(argv = process.argv) {
+export async function main(argv = process.argv) {
   const options = parseArgs(argv);
   if (options.help) {
     printUsage();
     return 0;
   }
-  const { reportPath, report } = runDevelopSync({ options });
+  const { reportPath, report } = await runDevelopSync({ options });
   console.log(`[priority:develop-sync] report=${reportPath} remotes=${report.remotes.join(',')}`);
   return 0;
 }
@@ -139,13 +523,14 @@ export function main(argv = process.argv) {
 const modulePath = path.resolve(fileURLToPath(import.meta.url));
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
 if (invokedPath && invokedPath === modulePath) {
-  try {
-    const code = main(process.argv);
+  main(process.argv)
+    .then((code) => {
     if (code !== 0) {
       process.exitCode = code;
     }
-  } catch (error) {
-    console.error(`[priority:develop-sync] ${error.message}`);
-    process.exitCode = 1;
-  }
+    })
+    .catch((error) => {
+      console.error(`[priority:develop-sync] ${error.message}`);
+      process.exitCode = 1;
+    });
 }
