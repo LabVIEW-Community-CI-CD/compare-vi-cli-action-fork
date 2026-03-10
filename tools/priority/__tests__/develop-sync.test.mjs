@@ -77,6 +77,7 @@ test('develop-sync falls back to a protected-fork PR lane when direct push is po
   const ghJsonCalls = [];
   const ghGraphqlCalls = [];
   let mergePolls = 0;
+  let checkPolls = 0;
   const writes = new Map();
 
   const result = await runDevelopSync({
@@ -94,9 +95,6 @@ test('develop-sync falls back to a protected-fork PR lane when direct push is po
           stdout: '',
           stderr: 'remote: error: GH013: Repository rule violations found.\nremote: Changes must be made through a pull request.\nremote: Changes must be made through the merge queue.'
         };
-      }
-      if (command === 'pwsh' && args.some((entry) => entry.endsWith('Watch-PRChecksSafe.ps1'))) {
-        return { status: 0, stdout: 'All tracked checks completed successfully.\n', stderr: '' };
       }
       if (command === 'node' && args.some((entry) => entry.endsWith('merge-sync-pr.mjs'))) {
         return { status: 0, stdout: '[priority:merge-sync] final mode=auto reason=merge-queue-branch-develop\n', stderr: '' };
@@ -135,6 +133,20 @@ test('develop-sync falls back to a protected-fork PR lane when direct push is po
       ghJsonCalls.push(args);
       if (args[0] === 'pr' && args[1] === 'list') {
         return [];
+      }
+      if (args[0] === 'pr' && args[1] === 'checks') {
+        checkPolls += 1;
+        if (checkPolls === 1) {
+          throw new Error("gh pr checks failed: no checks reported on the branch");
+        }
+        if (checkPolls === 2) {
+          return [
+            { name: 'lint', workflow: 'Validate', bucket: 'pending', state: 'IN_PROGRESS', link: 'https://example/check/1' }
+          ];
+        }
+        return [
+          { name: 'lint', workflow: 'Validate', bucket: 'pass', state: 'COMPLETED', link: 'https://example/check/1' }
+        ];
       }
       if (args[0] === 'pr' && args[1] === 'view') {
         mergePolls += 1;
@@ -195,10 +207,8 @@ test('develop-sync falls back to a protected-fork PR lane when direct push is po
     'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/88'
   );
   assert.ok(
-    spawnCalls.some(
-      (call) => call.command === 'pwsh' && call.args.some((entry) => entry.endsWith('Watch-PRChecksSafe.ps1'))
-    ),
-    'expected safe PR watcher invocation'
+    ghJsonCalls.some((args) => args[0] === 'pr' && args[1] === 'checks'),
+    'expected required-check polling'
   );
   assert.ok(
     spawnCalls.some(

@@ -30,6 +30,9 @@ const PROTECTED_BRANCH_PATTERNS = [
 ];
 const DEFAULT_MERGE_WAIT_POLL_MS = 15000;
 const DEFAULT_MERGE_WAIT_MAX_POLLS = 120;
+const DEFAULT_CHECK_WAIT_POLL_MS = 5000;
+const DEFAULT_CHECK_WAIT_MAX_POLLS = 36;
+const NO_CHECKS_REPORTED_PATTERN = /no checks reported/i;
 
 function printUsage() {
   console.log('Usage: node tools/priority/develop-sync.mjs [options]');
@@ -301,6 +304,77 @@ export async function waitForProtectedSyncPrMerged({
   throw new Error(`Timed out waiting for protected sync PR #${prNumber} to merge.`);
 }
 
+function summarizeCheckBuckets(checks = []) {
+  const summary = {
+    pass: 0,
+    fail: 0,
+    pending: 0,
+    skipping: 0,
+    cancel: 0
+  };
+  for (const check of checks) {
+    const bucket = String(check?.bucket ?? '').trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(summary, bucket)) {
+      summary[bucket] += 1;
+    }
+  }
+  return summary;
+}
+
+export async function waitForProtectedSyncPrChecks({
+  repoRoot,
+  repository,
+  prNumber,
+  pollIntervalMs = DEFAULT_CHECK_WAIT_POLL_MS,
+  maxPolls = DEFAULT_CHECK_WAIT_MAX_POLLS,
+  runGhJsonFn = runGhJson,
+  sleepFn = delay
+}) {
+  const repositorySlug = buildRepositorySlug(repository);
+  for (let poll = 1; poll <= maxPolls; poll += 1) {
+    let checks = [];
+    try {
+      checks = runGhJsonFn(
+        repoRoot,
+        [
+          'pr',
+          'checks',
+          String(prNumber),
+          '--json',
+          'name,state,workflow,bucket,link',
+          '--required',
+          '--repo',
+          repositorySlug
+        ]
+      );
+    } catch (error) {
+      const message = error?.message ?? String(error);
+      if (!NO_CHECKS_REPORTED_PATTERN.test(message)) {
+        throw error;
+      }
+    }
+
+    const normalizedChecks = Array.isArray(checks) ? checks : [];
+    const summary = summarizeCheckBuckets(normalizedChecks);
+    if (normalizedChecks.length > 0) {
+      console.log(
+        `[priority:develop-sync] pr=${prNumber} required-checks pass=${summary.pass} fail=${summary.fail} pending=${summary.pending} skip=${summary.skipping} cancel=${summary.cancel}`
+      );
+    }
+    if (summary.fail > 0 || summary.cancel > 0) {
+      throw new Error(`Protected sync PR #${prNumber} has failing required checks.`);
+    }
+    if (normalizedChecks.length > 0 && summary.pending === 0) {
+      return normalizedChecks;
+    }
+    if (poll < maxPolls) {
+      await sleepFn(pollIntervalMs);
+    }
+  }
+
+  throw new Error(`Timed out waiting for required checks on protected sync PR #${prNumber}.`);
+}
+
 function verifyParityReport(parityReportPath, readFileSyncFn = readFileSync) {
   const payload = JSON.parse(readFileSyncFn(parityReportPath, 'utf8'));
   const tipDiffCount = Number(payload?.tipDiff?.fileCount ?? Number.NaN);
@@ -359,24 +433,13 @@ export async function runProtectedForkSync({
     created = true;
   }
 
-  runCapturedCommand(
-    'pwsh',
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-File',
-      path.join(repoRoot, 'tools', 'Watch-PRChecksSafe.ps1'),
-      '-PullRequest',
-      String(pullRequest.number),
-      '-Repository',
-      repositorySlug,
-      '-RequiredOnly'
-    ],
-    {
-      cwd: repoRoot,
-      spawnSyncFn
-    }
-  );
+  await waitForProtectedSyncPrChecks({
+    repoRoot,
+    repository,
+    prNumber: pullRequest.number,
+    runGhJsonFn,
+    sleepFn
+  });
 
   runCapturedCommand(
     'node',
