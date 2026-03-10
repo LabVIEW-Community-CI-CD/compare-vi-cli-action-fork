@@ -219,4 +219,6 @@ test('Sync-OriginUpstreamDevelop forwards the requested parity report path to th
   assert.match(source, /report-origin-upstream-parity\.mjs'/);
   assert.match(source, /'--output-path'/);
   assert.match(source, /\$parityReportPath/);
+  assert.match(source, /'rev-parse', '--git-dir'/);
+  assert.match(source, /\$lockPath = Join-Path \$gitDir \$lockName/);
 });

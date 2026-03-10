@@ -144,6 +144,15 @@ $repoRoot = Get-GitValue -Arguments @('rev-parse', '--show-toplevel')
 if ([string]::IsNullOrWhiteSpace($repoRoot)) {
   throw 'Unable to resolve git repository root.'
 }
+$gitDirRaw = Get-GitValue -Arguments @('rev-parse', '--git-dir')
+if ([string]::IsNullOrWhiteSpace($gitDirRaw)) {
+  throw 'Unable to resolve git directory.'
+}
+$gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) {
+  [System.IO.Path]::GetFullPath($gitDirRaw)
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $repoRoot $gitDirRaw))
+}
 
 $baseRef = '{0}/{1}' -f $BaseRemote, $Branch
 $headRef = '{0}/{1}' -f $HeadRemote, $Branch
@@ -157,7 +166,7 @@ $parityReportPath = if ([string]::IsNullOrWhiteSpace($ParityReportPath)) {
   }
 }
 $lockName = ('priority-sync-{0}-{1}-{2}.lock' -f $BaseRemote, $HeadRemote, $Branch) -replace '[^A-Za-z0-9._-]', '_'
-$lockPath = Join-Path (Join-Path $repoRoot '.git') $lockName
+$lockPath = Join-Path $gitDir $lockName
 $lockStream = $null
 $restoreBranch = $false
 $startingBranch = ''
