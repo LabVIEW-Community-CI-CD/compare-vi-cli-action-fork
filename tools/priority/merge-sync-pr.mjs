@@ -190,6 +190,10 @@ export function assertUpstreamOwnedHead(prInfo = {}, repo = '') {
   return isUpstreamOwnedHead(prInfo, repo);
 }
 
+export function usesMergeQueueAutoMode({ mode = '', reason = '' } = {}) {
+  return mode === 'auto' && normalizeLower(reason).startsWith('merge-queue-branch-');
+}
+
 export function buildMergeSummaryPayload({
   repo,
   pr,
@@ -320,9 +324,9 @@ function readPrInfo({ repoRoot, repo, pr }) {
   return parseJsonOutput(result.stdout ?? '{}', { label: 'gh pr view output' });
 }
 
-function buildMergeArgs({ pr, repo, method, mode, keepBranch }) {
+export function buildMergeArgs({ pr, repo, method, mode, reason = '', keepBranch }) {
   const args = ['pr', 'merge', String(pr), '--repo', repo, `--${method}`];
-  if (!keepBranch) {
+  if (!keepBranch && !usesMergeQueueAutoMode({ mode, reason })) {
     args.push('--delete-branch');
   }
   if (mode === 'auto') {
@@ -399,6 +403,7 @@ export async function runMergeSync({
       repo: resolvedRepo,
       method: options.method,
       mode: selection.mode,
+      reason: selection.reason,
       keepBranch: options.keepBranch
     });
     const initialResult = runMergeAttempt({ repoRoot, args: initialArgs, dryRun: options.dryRun });
@@ -423,6 +428,7 @@ export async function runMergeSync({
           repo: resolvedRepo,
           method: options.method,
           mode: 'auto',
+          reason: finalReason,
           keepBranch: options.keepBranch
         });
         const retryResult = runMergeAttempt({ repoRoot, args: retryArgs, dryRun: options.dryRun });

@@ -2,13 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertUpstreamOwnedHead,
+  buildMergeArgs,
   buildMergeSummaryPayload,
   buildPolicyTrace,
   isUpstreamOwnedHead,
   normalizeBaseRefName,
   selectMergeMode,
   shouldRetryWithAuto,
-  getMergeQueueBranches
+  getMergeQueueBranches,
+  usesMergeQueueAutoMode
 } from '../merge-sync-pr.mjs';
 
 test('selectMergeMode chooses auto for policy-blocked merge states', () => {
@@ -126,6 +128,12 @@ test('selectMergeMode chooses auto for merge-queue branches', () => {
     mode: 'auto',
     reason: 'merge-queue-branch-main'
   });
+});
+
+test('usesMergeQueueAutoMode matches only queue-backed auto selections', () => {
+  assert.equal(usesMergeQueueAutoMode({ mode: 'auto', reason: 'merge-queue-branch-develop' }), true);
+  assert.equal(usesMergeQueueAutoMode({ mode: 'auto', reason: 'merge-state-blocked' }), false);
+  assert.equal(usesMergeQueueAutoMode({ mode: 'direct', reason: 'merge-queue-branch-develop' }), false);
 });
 
 test('selectMergeMode keeps queue reason stable for refs/heads base branch values', () => {
@@ -298,6 +306,48 @@ test('buildPolicyTrace emits deterministic sorted queue branch metadata', () => 
     manifestPath: 'tools/priority/policy.json',
     mergeQueueBranches: ['develop', 'main']
   });
+});
+
+test('buildMergeArgs omits delete-branch for merge-queue auto admissions', () => {
+  const args = buildMergeArgs({
+    pr: 975,
+    repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    method: 'squash',
+    mode: 'auto',
+    reason: 'merge-queue-branch-develop',
+    keepBranch: false
+  });
+
+  assert.deepEqual(args, [
+    'pr',
+    'merge',
+    '975',
+    '--repo',
+    'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    '--squash',
+    '--auto'
+  ]);
+});
+
+test('buildMergeArgs keeps delete-branch for non-queue direct merges unless keep-branch is set', () => {
+  const args = buildMergeArgs({
+    pr: 976,
+    repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    method: 'squash',
+    mode: 'direct',
+    reason: 'clean-mergeable',
+    keepBranch: false
+  });
+
+  assert.deepEqual(args, [
+    'pr',
+    'merge',
+    '976',
+    '--repo',
+    'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    '--squash',
+    '--delete-branch'
+  ]);
 });
 
 test('buildMergeSummaryPayload remains stable for direct mode contracts', () => {
