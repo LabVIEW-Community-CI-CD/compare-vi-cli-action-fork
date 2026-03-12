@@ -98,6 +98,27 @@ function normalizeText(value) {
   return String(value).trim();
 }
 
+function parseJsonObjectOutput(raw, source = 'command output') {
+  const trimmed = normalizeText(raw);
+  if (!trimmed) {
+    return {};
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch (error) {
+    const rootStart = trimmed.lastIndexOf('\n{');
+    if (rootStart >= 0) {
+      try {
+        return JSON.parse(trimmed.slice(rootStart + 1));
+      } catch {
+        // Fall through to the explicit error below.
+      }
+    }
+    const preview = trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed;
+    throw new Error(`Unable to parse JSON from ${source}: ${error.message} (output=${JSON.stringify(preview)})`);
+  }
+}
+
 function coercePositiveInteger(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -626,6 +647,7 @@ async function invokeCanonicalDeliveryTurn({
   if (!taskPacketPath) {
     throw new Error('task packet artifact path is required for canonical delivery turns');
   }
+  const brokerReceiptPath = path.join(path.dirname(taskPacketPath), 'broker-execution-receipt.json');
   const execFn = deps.execFileFn ?? execFileAsync;
   const { stdout } = await execFn(
     'node',
@@ -636,14 +658,20 @@ async function invokeCanonicalDeliveryTurn({
       '--task-packet',
       taskPacketPath,
       '--policy',
-      DELIVERY_AGENT_POLICY_RELATIVE_PATH
+      DELIVERY_AGENT_POLICY_RELATIVE_PATH,
+      '--receipt-out',
+      brokerReceiptPath
     ],
     {
       cwd: repoRoot,
       env: process.env
     }
   );
-  const parsed = JSON.parse(stdout || '{}');
+  const fileReceipt = await readJsonIfPresent(brokerReceiptPath);
+  if (fileReceipt && typeof fileReceipt === 'object') {
+    return fileReceipt;
+  }
+  const parsed = parseJsonObjectOutput(stdout, 'runtime-turn-broker stdout');
   return parsed && typeof parsed === 'object' ? parsed : {};
 }
 
