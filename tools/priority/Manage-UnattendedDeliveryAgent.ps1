@@ -135,6 +135,87 @@ function Read-LogTail {
   }
 }
 
+function Resolve-ObserverTelemetry {
+  param(
+    [AllowNull()][object]$CodexStateHygiene,
+    [Parameter(Mandatory)][string]$ReportPath
+  )
+
+  $fallback = [ordered]@{
+    plane = 'observer'
+    source = 'codex-state-hygiene'
+    status = 'unknown'
+    deliveryCritical = $false
+    hotPathEligible = $false
+    deliveryImpact = 'none'
+    reasons = @('report-missing')
+    counts = [ordered]@{
+      gitOriginAndRoots = 0
+      localEnvironmentsUnsupported = 0
+      openInTargetUnsupported = 0
+      unhandledBroadcastNoHandler = 0
+      threadStreamStateChanged = 0
+      threadQueuedFollowupsChanged = 0
+      databaseLocked = 0
+      slowStatement = 0
+    }
+    reportPath = $ReportPath
+  }
+
+  if ($null -eq $CodexStateHygiene) {
+    return $fallback
+  }
+
+  $observer = if ($CodexStateHygiene.PSObject.Properties['observer']) {
+    $CodexStateHygiene.observer
+  } else {
+    $null
+  }
+  if ($observer) {
+    if (-not $observer.PSObject.Properties['reportPath']) {
+      $observer | Add-Member -NotePropertyName reportPath -NotePropertyValue $ReportPath -Force
+    }
+    return $observer
+  }
+
+  $legacyStatus = if ($CodexStateHygiene.PSObject.Properties['status']) {
+    [string]$CodexStateHygiene.status
+  } else {
+    'unknown'
+  }
+  $fallback.reasons = @('legacy-report-shape')
+  if ($CodexStateHygiene.PSObject.Properties['extensionLog'] -and $CodexStateHygiene.extensionLog) {
+    $counts = if ($CodexStateHygiene.extensionLog.PSObject.Properties['counts']) {
+      $CodexStateHygiene.extensionLog.counts
+    } else {
+      $null
+    }
+    if ($counts) {
+      foreach ($name in @('gitOriginAndRoots', 'localEnvironmentsUnsupported', 'openInTargetUnsupported', 'unhandledBroadcastNoHandler', 'threadStreamStateChanged', 'threadQueuedFollowupsChanged', 'databaseLocked', 'slowStatement')) {
+        if ($counts.PSObject.Properties[$name]) {
+          $fallback.counts.$name = [int]$counts.$name
+        }
+      }
+    }
+  }
+  $legacyPressureReasons = @()
+  foreach ($name in @('gitOriginAndRoots', 'localEnvironmentsUnsupported', 'openInTargetUnsupported', 'unhandledBroadcastNoHandler', 'threadStreamStateChanged', 'threadQueuedFollowupsChanged', 'databaseLocked', 'slowStatement')) {
+    if ([int]$fallback.counts.$name -gt 0) {
+      $legacyPressureReasons += $name
+    }
+  }
+  if ($legacyPressureReasons.Count -gt 0 -or $legacyStatus -eq 'action-needed') {
+    $fallback.status = 'degraded'
+    $fallback.reasons += $legacyPressureReasons
+  } elseif ($legacyStatus -eq 'unknown') {
+    $fallback.status = 'unknown'
+  } else {
+    $fallback.status = 'healthy'
+  }
+
+  return $fallback
+}
+
 function Get-ArtifactPaths {
   param([Parameter(Mandatory)][string]$RepoRoot)
 
@@ -732,6 +813,7 @@ function Emit-Status {
   $deliveryState = $resolvedDelivery.state
   $deliveryMemory = Read-JsonFile -Path $Paths.DeliveryMemoryPath
   $codexStateHygiene = Read-JsonFile -Path $Paths.CodexStateHygienePath
+  $observer = Resolve-ObserverTelemetry -CodexStateHygiene $codexStateHygiene -ReportPath $Paths.CodexStateHygienePath
   $hostSignal = Read-JsonFile -Path $Paths.HostSignalPath
   $hostIsolation = Read-JsonFile -Path $Paths.HostIsolationPath
   $wslNativeDocker = Read-JsonFile -Path $Paths.WslNativeDockerPath
@@ -768,6 +850,7 @@ function Emit-Status {
     delivery = $deliveryState
     heartbeatDiagnostics = $resolvedDelivery.diagnostics
     deliveryMemory = $deliveryMemory
+    observer = $observer
     codexStateHygiene = $codexStateHygiene
     hostSignal = $hostSignal
     hostIsolation = $hostIsolation
@@ -807,6 +890,7 @@ function Emit-Status {
     heartbeatReason = $resolvedDelivery.diagnostics.reason
     heartbeatUsed = [bool]$resolvedDelivery.diagnostics.usedHeartbeat
     heartbeatGeneratedAt = $resolvedDelivery.diagnostics.heartbeatGeneratedAt
+    observerStatus = Get-OptionalStringProperty -InputObject $observer -Name 'status'
     daemonLogLineCount = $daemonLogTail.Count
     managerStdoutLineCount = $managerLogTail.Count
     managerStderrLineCount = $managerErrorLogTail.Count

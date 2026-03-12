@@ -371,40 +371,85 @@ function Stop-WslRuntimeDaemon {
   }
 }
 
-function Invoke-CodexStateHygiene {
-  param([Parameter(Mandatory)][string]$RepoRoot)
+function Resolve-ObserverTelemetry {
+  param(
+    [AllowNull()][object]$CodexStateHygiene,
+    [Parameter(Mandatory)][string]$ReportPath
+  )
 
-  $nodePath = Resolve-CommandPath -Name 'node'
-  $scriptPath = Join-Path $RepoRoot 'tools\priority\codex-state-hygiene.mjs'
-  $reportPath = Join-Path $RepoRoot 'tests\results\_agent\runtime\codex-state-hygiene.json'
-  if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
-    return [ordered]@{
-      status = 'skipped'
-      reason = 'script-missing'
-      reportPath = $reportPath
+  $fallback = [ordered]@{
+    plane = 'observer'
+    source = 'codex-state-hygiene'
+    status = 'unknown'
+    deliveryCritical = $false
+    hotPathEligible = $false
+    deliveryImpact = 'none'
+    reasons = @('report-missing')
+    counts = [ordered]@{
+      gitOriginAndRoots = 0
+      localEnvironmentsUnsupported = 0
+      openInTargetUnsupported = 0
+      unhandledBroadcastNoHandler = 0
+      threadStreamStateChanged = 0
+      threadQueuedFollowupsChanged = 0
+      databaseLocked = 0
+      slowStatement = 0
     }
+    reportPath = $ReportPath
   }
 
-  $output = & $nodePath --no-warnings $scriptPath --apply --repo-root $RepoRoot --report $reportPath
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne 0) {
-    return [ordered]@{
-      status = 'error'
-      reason = 'tool-failed'
-      exitCode = $exitCode
-      reportPath = $reportPath
-    }
+  if ($null -eq $CodexStateHygiene) {
+    return $fallback
   }
 
-  try {
-    return (($output -join [Environment]::NewLine) | ConvertFrom-Json -Depth 20 -ErrorAction Stop)
-  } catch {
-    return [ordered]@{
-      status = 'error'
-      reason = 'report-parse-failed'
-      reportPath = $reportPath
+  $observer = if ($CodexStateHygiene.PSObject.Properties['observer']) {
+    $CodexStateHygiene.observer
+  } else {
+    $null
+  }
+  if ($observer) {
+    if (-not $observer.PSObject.Properties['reportPath']) {
+      $observer | Add-Member -NotePropertyName reportPath -NotePropertyValue $ReportPath -Force
+    }
+    return $observer
+  }
+
+  $legacyStatus = if ($CodexStateHygiene.PSObject.Properties['status']) {
+    [string]$CodexStateHygiene.status
+  } else {
+    'unknown'
+  }
+  $fallback.reasons = @('legacy-report-shape')
+  if ($CodexStateHygiene.PSObject.Properties['extensionLog'] -and $CodexStateHygiene.extensionLog) {
+    $counts = if ($CodexStateHygiene.extensionLog.PSObject.Properties['counts']) {
+      $CodexStateHygiene.extensionLog.counts
+    } else {
+      $null
+    }
+    if ($counts) {
+      foreach ($name in @('gitOriginAndRoots', 'localEnvironmentsUnsupported', 'openInTargetUnsupported', 'unhandledBroadcastNoHandler', 'threadStreamStateChanged', 'threadQueuedFollowupsChanged', 'databaseLocked', 'slowStatement')) {
+        if ($counts.PSObject.Properties[$name]) {
+          $fallback.counts.$name = [int]$counts.$name
+        }
+      }
     }
   }
+  $legacyPressureReasons = @()
+  foreach ($name in @('gitOriginAndRoots', 'localEnvironmentsUnsupported', 'openInTargetUnsupported', 'unhandledBroadcastNoHandler', 'threadStreamStateChanged', 'threadQueuedFollowupsChanged', 'databaseLocked', 'slowStatement')) {
+    if ([int]$fallback.counts.$name -gt 0) {
+      $legacyPressureReasons += $name
+    }
+  }
+  if ($legacyPressureReasons.Count -gt 0 -or $legacyStatus -eq 'action-needed') {
+    $fallback.status = 'degraded'
+    $fallback.reasons += $legacyPressureReasons
+  } elseif ($legacyStatus -eq 'unknown') {
+    $fallback.status = 'unknown'
+  } else {
+    $fallback.status = 'healthy'
+  }
+
+  return $fallback
 }
 
 function Invoke-DeliveryMemory {
@@ -627,6 +672,7 @@ $wslPidPath = Join-Path $runtimeDirPath 'delivery-agent-wsl-daemon-pid.json'
 $observerHeartbeatPath = Join-Path $runtimeDirPath 'observer-heartbeat.json'
 $observerReportPath = Join-Path $runtimeDirPath 'runtime-daemon-report.json'
 $deliveryMemoryPath = Join-Path $runtimeDirPath 'delivery-memory.json'
+$codexStateHygienePath = Join-Path $runtimeDirPath 'codex-state-hygiene.json'
 $hostSignalPath = Join-Path $runtimeDirPath 'daemon-host-signal.json'
 $hostIsolationPath = Join-Path $runtimeDirPath 'delivery-agent-host-isolation.json'
 $hostTracePath = Join-Path $runtimeDirPath 'delivery-agent-host-trace.ndjson'
@@ -662,7 +708,8 @@ if ($ensureAttempt.ok) {
 
 $cycle = 0
 $activeDaemonPid = [int]0
-$codexStateHygiene = $null
+$codexStateHygiene = Read-JsonFile -Path $codexStateHygienePath
+$observerTelemetry = Resolve-ObserverTelemetry -CodexStateHygiene $codexStateHygiene -ReportPath $codexStateHygienePath
 $deliveryMemory = $null
 $hostSignal = Read-JsonFile -Path $hostSignalPath
 $hostIsolation = Update-HostIsolationState -Path $hostIsolationPath -Repo $Repo -RuntimeDir $RuntimeDir -Distro $WslDistro -HostSignalPath $hostSignalPath -HostSignal $hostSignal
@@ -859,11 +906,9 @@ try {
       }
     }
 
-    if ($CodexHygieneIntervalCycles -gt 0 -and (($cycle -eq 1) -or (($cycle % $CodexHygieneIntervalCycles) -eq 0))) {
-      $codexStateHygiene = Invoke-CodexStateHygiene -RepoRoot $repoRoot
-    }
-
     $deliveryMemory = Invoke-DeliveryMemory -RepoRoot $repoRoot -Repo $Repo -RuntimeDir $RuntimeDir
+    $codexStateHygiene = Read-JsonFile -Path $codexStateHygienePath
+    $observerTelemetry = Resolve-ObserverTelemetry -CodexStateHygiene $codexStateHygiene -ReportPath $codexStateHygienePath
 
     $heartbeat = Read-JsonFile -Path $observerHeartbeatPath
     $report = Read-JsonFile -Path $observerReportPath
@@ -901,6 +946,7 @@ try {
       hostSignal = $hostSignal
       hostIsolation = $hostIsolation
       wslNativeDocker = $wslNativeDocker
+      observer = $observerTelemetry
       codexStateHygiene = $codexStateHygiene
       deliveryMemory = $deliveryMemory
       deliveryMemoryPath = $deliveryMemoryPath
@@ -922,6 +968,7 @@ try {
         hostSignal = $hostSignal
         hostIsolation = $hostIsolation
         wslNativeDocker = $wslNativeDocker
+        observer = $observerTelemetry
         codexStateHygiene = $codexStateHygiene
         deliveryMemory = $deliveryMemory
         managerTracePath = $managerTracePath

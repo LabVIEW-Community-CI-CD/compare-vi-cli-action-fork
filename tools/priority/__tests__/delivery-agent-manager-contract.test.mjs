@@ -82,6 +82,7 @@ test('delivery-agent manager and run scripts target the WSL runtime daemon inste
 
   assert.match(manager, /Ensure-WSLDeliveryPrereqs\.ps1/);
   assert.match(manager, /CodexStateHygienePath/);
+  assert.match(manager, /Resolve-ObserverTelemetry/);
   assert.match(manager, /DeliveryMemoryPath/);
   assert.match(manager, /HostSignalPath/);
   assert.match(manager, /HostIsolationPath/);
@@ -92,6 +93,7 @@ test('delivery-agent manager and run scripts target the WSL runtime daemon inste
   assert.match(manager, /delivery-host-signal\.js/);
   assert.match(manager, /wsl\.exe/);
   assert.match(manager, /heartbeatDiagnostics/);
+  assert.match(manager, /observer = \$observer/);
   assert.match(manager, /RuntimeStatePath/);
   assert.match(manager, /TaskPacketPath/);
   assert.match(manager, /logTail/);
@@ -110,7 +112,7 @@ test('delivery-agent manager and run scripts target the WSL runtime daemon inste
   assert.doesNotMatch(runner, /exec \$\(\$quotedArgs -join ' '\) >> '\$LogPathWsl' 2>&1/);
   assert.match(runner, /\[System\.IO\.File\]::WriteAllText\(/);
   assert.match(runner, /\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
-  assert.match(runner, /Invoke-CodexStateHygiene/);
+  assert.match(runner, /Resolve-ObserverTelemetry/);
   assert.match(runner, /Invoke-DeliveryMemory/);
   assert.match(runner, /Invoke-DeliveryHostSignal/);
   assert.match(runner, /delivery-agent-host-trace\.ndjson/);
@@ -123,7 +125,7 @@ test('delivery-agent manager and run scripts target the WSL runtime daemon inste
   assert.match(runner, /Get-WslRuntimeDaemonUnitName/);
   assert.doesNotMatch(runner, /-PreviousFingerprint \(if/);
   assert.match(runner, /delivery-memory\.json/);
-  assert.match(runner, /CodexHygieneIntervalCycles/);
+  assert.doesNotMatch(runner, /Invoke-CodexStateHygiene/);
   assert.match(ensurePrereqs, /nodejs\.org\/dist/);
   assert.match(ensurePrereqs, /@openai\/codex/);
   assert.match(ensurePrereqs, /codex_needs_install=0/);
@@ -259,6 +261,46 @@ test('delivery-agent manager status derives from a fresh heartbeat when no deliv
   assert.equal(status.heartbeatDiagnostics.usedHeartbeat, true);
   assert.equal(status.heartbeatDiagnostics.reason, 'fresh-heartbeat');
   assert.ok(Array.isArray(status.logTail.daemon));
+});
+
+test('delivery-agent manager status exposes observer telemetry as non-blocking state', async (t) => {
+  const runtimeDirPath = await mkdtemp(path.join(repoRoot, 'tests', 'results', '_agent', 'tmp-manager-status-observer-'));
+  const relativeRuntimeDir = path.relative(repoRoot, runtimeDirPath);
+  t.after(async () => {
+    await rm(runtimeDirPath, { recursive: true, force: true });
+  });
+
+  await writeJson(path.join(runtimeDirPath, 'codex-state-hygiene.json'), {
+    schema: 'priority/codex-state-hygiene-report@v1',
+    generatedAt: new Date('2026-03-11T20:00:00.000Z').toISOString(),
+    observer: {
+      plane: 'observer',
+      source: 'codex-state-hygiene',
+      status: 'degraded',
+      deliveryCritical: false,
+      hotPathEligible: false,
+      deliveryImpact: 'none',
+      reasons: ['thread-stream-state-changed'],
+      counts: {
+        gitOriginAndRoots: 0,
+        localEnvironmentsUnsupported: 0,
+        openInTargetUnsupported: 0,
+        unhandledBroadcastNoHandler: 1,
+        threadStreamStateChanged: 1,
+        threadQueuedFollowupsChanged: 0,
+        databaseLocked: 0,
+        slowStatement: 0
+      }
+    }
+  });
+
+  const status = await invokeManagerStatus(relativeRuntimeDir);
+
+  assert.equal(status.observer.plane, 'observer');
+  assert.equal(status.observer.status, 'degraded');
+  assert.equal(status.observer.deliveryCritical, false);
+  assert.equal(status.observer.hotPathEligible, false);
+  assert.equal(status.observer.deliveryImpact, 'none');
 });
 
 test('delivery-agent manager status prefers a fresher runtime state and task packet over stale delivery and heartbeat artifacts', async (t) => {
