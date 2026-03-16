@@ -30,6 +30,13 @@ function readDefaultPrTemplate(filePath, encoding) {
   return nodeReadFileSync(filePath, encoding);
 }
 
+function createPriorityPrWithNoMergedHistory(overrides = {}) {
+  return createPriorityPr({
+    findMergedPullRequestFn: () => null,
+    ...overrides
+  });
+}
+
 test('parseArgs accepts explicit PR helper overrides', () => {
   const options = parseArgs([
     'node',
@@ -275,7 +282,7 @@ test('resolveStandingIssueNumberForPr falls back to cache when router is unavail
 test('createPriorityPr refuses to open a priority PR when the standing queue is empty', () => {
   assert.throws(
     () =>
-      createPriorityPr({
+      createPriorityPrWithNoMergedHistory({
         env: {},
         options: {},
         getRepoRootFn: () => '/tmp/repo',
@@ -297,6 +304,7 @@ test('createPriorityPr refuses to open a priority PR when the standing queue is 
 test('parseIssueNumberFromBranch extracts issue numbers from issue/* branches', () => {
   assert.equal(parseIssueNumberFromBranch('issue/680-sync-standing-priority'), 680);
   assert.equal(parseIssueNumberFromBranch('issue/personal-680-sync-standing-priority'), 680);
+  assert.equal(parseIssueNumberFromBranch('issue/origin-1420-security-intake-dependabot-api-400'), 1420);
   assert.equal(parseIssueNumberFromBranch('feature/something'), null);
 });
 
@@ -376,7 +384,7 @@ test('resolveBody prefers explicit body-file content over env defaults', () => {
 test('createPriorityPr builds PR metadata from resolved standing issue', () => {
   let pushedBranch = null;
   let prPayload = null;
-  const result = createPriorityPr({
+  const result = createPriorityPrWithNoMergedHistory({
     env: {},
     options: {},
     readFileSyncFn: readDefaultPrTemplate,
@@ -384,7 +392,12 @@ test('createPriorityPr builds PR metadata from resolved standing issue', () => {
     getCurrentBranchFn: () => 'issue/680-sync-standing-priority',
     ensureGhCliFn: () => {},
     resolveUpstreamFn: () => ({ owner: 'upstream-owner', repo: 'repo' }),
-    ensureForkRemoteFn: (_repoRoot, _upstream, remote) => ({ owner: 'fork-owner', repo: 'repo', remoteName: remote }),
+    ensureForkRemoteFn: (_repoRoot, _upstream, remote) => ({
+      owner: 'LabVIEW-Community-CI-CD',
+      repo: 'compare-vi-cli-action-fork',
+      sameOwnerFork: true,
+      remoteName: remote
+    }),
     pushBranchFn: (_repoRoot, branch, remote) => {
       pushedBranch = `${remote}:${branch}`;
     },
@@ -453,7 +466,7 @@ test('resolveStandingIssueNumberForPr drops stale cached metadata when router-se
 
 test('createPriorityPr honors explicit CLI overrides and body files', () => {
   let prPayload = null;
-  const result = createPriorityPr({
+  const result = createPriorityPrWithNoMergedHistory({
     env: {},
     options: {
       repository: 'example/upstream',
@@ -499,7 +512,7 @@ test('createPriorityPr fails before PR creation when branch issue mismatches sta
   let prCreated = false;
   assert.throws(
     () =>
-      createPriorityPr({
+      createPriorityPrWithNoMergedHistory({
         env: {},
         options: {},
         getRepoRootFn: () => '/tmp/repo',
@@ -518,10 +531,41 @@ test('createPriorityPr fails before PR creation when branch issue mismatches sta
   assert.equal(prCreated, false);
 });
 
+test('createPriorityPr ignores incidental trailing numeric suffixes when matching standing issue branches', () => {
+  let prPayload = null;
+  const result = createPriorityPrWithNoMergedHistory({
+    env: {},
+    options: {
+      issue: 1420
+    },
+    readFileSyncFn: readDefaultPrTemplate,
+    getRepoRootFn: () => '/tmp/repo',
+    getCurrentBranchFn: () => 'issue/origin-1420-security-intake-dependabot-api-400',
+    ensureGhCliFn: () => {},
+    resolveUpstreamFn: () => ({ owner: 'upstream-owner', repo: 'repo' }),
+    ensureForkRemoteFn: (_repoRoot, _upstream, remote) => ({
+      owner: 'LabVIEW-Community-CI-CD',
+      repo: 'compare-vi-cli-action-fork',
+      sameOwnerFork: true,
+      remoteName: remote
+    }),
+    pushBranchFn: () => {},
+    runGhPrCreateFn: (payload) => {
+      prPayload = payload;
+      return { strategy: 'gh-pr-create' };
+    },
+    resolveStandingIssueNumberFn: () => ({ issueNumber: 1420, source: 'router' }),
+    loadBranchClassContractFn: () => TEST_BRANCH_CONTRACT
+  });
+
+  assert.equal(result.issueNumber, 1420);
+  assert.equal(prPayload.branch, 'issue/origin-1420-security-intake-dependabot-api-400');
+});
+
 test('createPriorityPr uses mirror metadata for PR closing references while matching the local mirror branch', () => {
   let observedTitle = null;
   let observedBody = null;
-  createPriorityPr({
+  createPriorityPrWithNoMergedHistory({
     env: { AGENT_PRIORITY_ACTIVE_FORK_REMOTE: 'personal' },
     options: {},
     readFileSyncFn: readDefaultPrTemplate,
@@ -560,7 +604,7 @@ test('createPriorityPr uses mirror metadata for PR closing references while matc
 test('createPriorityPr selects the personal remote from the branch contract for personal lane branches', () => {
   let observedRemote = null;
   let observedBranchModel = null;
-  const result = createPriorityPr({
+  const result = createPriorityPrWithNoMergedHistory({
     env: {},
     options: {},
     getRepoRootFn: () => '/tmp/repo',
@@ -587,7 +631,7 @@ test('createPriorityPr selects the personal remote from the branch contract for 
 test('createPriorityPr fails closed when an explicit head remote conflicts with the branch contract', () => {
   assert.throws(
     () =>
-      createPriorityPr({
+      createPriorityPrWithNoMergedHistory({
         env: {},
         options: {
           headRemote: 'origin'
@@ -683,7 +727,7 @@ test('writePriorityPrReport persists personal fork lane metadata for future resu
 });
 
 test('createPriorityPr preserves an already-published human-drafted PR so a later ready-for-review transition can trigger a fresh Copilot review', () => {
-  const result = createPriorityPr({
+  const result = createPriorityPrWithNoMergedHistory({
     env: {},
     options: {
       repository: 'example/upstream',
@@ -730,4 +774,46 @@ test('createPriorityPr preserves an already-published human-drafted PR so a late
   assert.equal(result.reusedExistingPullRequest, true);
   assert.equal(result.pullRequest.number, 963);
   assert.equal(result.pullRequest.isDraft, true);
+});
+
+test('createPriorityPr fails closed before push when the branch already backed a merged PR', () => {
+  let pushCalled = false;
+  let createCalled = false;
+
+  assert.throws(
+    () =>
+      createPriorityPr({
+        env: {},
+        options: {},
+        getRepoRootFn: () => '/tmp/repo',
+        getCurrentBranchFn: () => 'issue/origin-1430-queue-auto-branch-cleanup',
+        ensureGhCliFn: () => {},
+        resolveUpstreamFn: () => ({ owner: 'LabVIEW-Community-CI-CD', repo: 'compare-vi-cli-action' }),
+        ensureForkRemoteFn: (_repoRoot, _upstream, remote) => ({
+          owner: 'LabVIEW-Community-CI-CD',
+          repo: 'compare-vi-cli-action-fork',
+          sameOwnerFork: true,
+          remoteName: remote
+        }),
+        pushBranchFn: () => {
+          pushCalled = true;
+          return {};
+        },
+        runGhPrCreateFn: () => {
+          createCalled = true;
+          return { strategy: 'graphql-same-owner-fork' };
+        },
+        findMergedPullRequestFn: () => ({
+          number: 1433,
+          url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action/pull/1433',
+          state: 'MERGED'
+        }),
+        resolveStandingIssueNumberFn: () => ({ issueNumber: 1430, source: 'router' }),
+        loadBranchClassContractFn: () => TEST_BRANCH_CONTRACT
+      }),
+    /already backed merged PR #1433 .*Cut a fresh branch from develop/i
+  );
+
+  assert.equal(pushCalled, false);
+  assert.equal(createCalled, false);
 });

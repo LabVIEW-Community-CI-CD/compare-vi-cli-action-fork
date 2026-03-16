@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { runCopilotReviewGate } from './copilot-review-gate.mjs';
-import { ensureGhCli, resolveUpstream } from './lib/remote-utils.mjs';
+import { ensureGhCli, resolveUpstream, runGhJson } from './lib/remote-utils.mjs';
 import { getRepoRoot } from './lib/branch-utils.mjs';
 import {
   DEFAULT_BRANCH_CLASS_CONTRACT_RELATIVE_PATH,
@@ -19,6 +19,9 @@ import {
 } from './lib/branch-classification.mjs';
 
 const manifestPath = new URL('./policy.json', import.meta.url);
+const DELIVERY_AGENT_POLICY_RELATIVE_PATH = path.join('tools', 'priority', 'delivery-agent.policy.json');
+const DEFAULT_COPILOT_REVIEW_STRATEGY = 'github-review-required';
+const LOCAL_ONLY_COPILOT_REVIEW_STRATEGY = 'draft-only-explicit';
 
 const USAGE_LINES = [
   'Usage: node tools/priority/merge-sync-pr.mjs --pr <number> [options]',
@@ -27,7 +30,7 @@ const USAGE_LINES = [
   '  --pr <number>            Pull request number to merge (required)',
   '  --repo <owner/repo>      Target repository (defaults to upstream remote)',
   '  --method <merge|squash|rebase>',
-  '                           Merge method (default: squash)',
+  '                           Merge method override (default: repository-aware selection preferring squash)',
   '  --admin                  Explicitly use admin merge override',
   '  --keep-branch            Keep head branch after merge',
   '  --dry-run                Print selected mode and merge command without executing',
@@ -36,6 +39,7 @@ const USAGE_LINES = [
 ];
 
 const MERGE_METHODS = new Set(['merge', 'squash', 'rebase']);
+const MERGE_METHOD_FALLBACK_ORDER = ['squash', 'rebase', 'merge'];
 const MERGE_ACTIVATION_POLL_ATTEMPTS = 5;
 const MERGE_ACTIVATION_POLL_DELAY_MS = 1500;
 const PROMOTION_REVIEW_GATE_POLL_ATTEMPTS = 1;
@@ -68,6 +72,7 @@ function parseArgs(argv = process.argv) {
     pr: null,
     repo: null,
     method: 'squash',
+    methodExplicit: false,
     admin: false,
     keepBranch: false,
     dryRun: false,
@@ -112,6 +117,7 @@ function parseArgs(argv = process.argv) {
           throw new Error(`Invalid --method '${value}'. Expected one of: ${Array.from(MERGE_METHODS).join(', ')}`);
         }
         options.method = value;
+        options.methodExplicit = true;
       } else if (arg === '--summary-path') {
         options.summaryPath = value;
       }
@@ -141,6 +147,14 @@ function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+export function normalizeCopilotReviewStrategy(value) {
+  const normalized = normalizeText(value) || DEFAULT_COPILOT_REVIEW_STRATEGY;
+  if (normalized === DEFAULT_COPILOT_REVIEW_STRATEGY || normalized === LOCAL_ONLY_COPILOT_REVIEW_STRATEGY) {
+    return normalized;
+  }
+  throw new Error(`Unsupported copilotReviewStrategy: ${normalized}`);
+}
+
 function normalizeOwner(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
@@ -157,6 +171,22 @@ function parseRepoSlug(repo) {
   return { owner, name };
 }
 
+export async function loadMergeSyncCopilotReviewStrategy({
+  repoRoot = getRepoRoot(),
+  readFileFn = readFile
+} = {}) {
+  const policyPath = path.join(repoRoot, DELIVERY_AGENT_POLICY_RELATIVE_PATH);
+  try {
+    const payload = JSON.parse(await readFileFn(policyPath, 'utf8'));
+    return normalizeCopilotReviewStrategy(payload?.copilotReviewStrategy);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return DEFAULT_COPILOT_REVIEW_STRATEGY;
+    }
+    throw error;
+  }
+}
+
 export function normalizeBaseRefName(value) {
   const lowered = normalizeLower(value).trim();
   if (!lowered) {
@@ -167,6 +197,59 @@ export function normalizeBaseRefName(value) {
     return lowered.substring(refsPrefix.length);
   }
   return lowered;
+}
+
+export function isQueueManagedBaseBranch({ baseRefName = '', mergeQueueBranches = new Set(), baseBranchClass = null } = {}) {
+  if (baseBranchClass?.mergePolicy === 'merge-queue-squash') {
+    return true;
+  }
+  const normalizedBaseRefName = normalizeBaseRefName(baseRefName);
+  if (!normalizedBaseRefName) {
+    return false;
+  }
+  return mergeQueueBranches.has(normalizedBaseRefName);
+}
+
+export function resolveBranchCleanupPlan({
+  keepBranch = false,
+  mode = 'auto',
+  baseRefName = '',
+  mergeQueueBranches = new Set(),
+  baseBranchClass = null
+} = {}) {
+  if (keepBranch) {
+    return {
+      requested: false,
+      inlineDeleteBranch: false,
+      postMergeDelete: false,
+      reason: 'keep-branch'
+    };
+  }
+
+  if (mode === 'auto') {
+    return {
+      requested: true,
+      inlineDeleteBranch: false,
+      postMergeDelete: true,
+      reason: 'post-merge-api-delete'
+    };
+  }
+
+  if (isQueueManagedBaseBranch({ baseRefName, mergeQueueBranches, baseBranchClass })) {
+    return {
+      requested: true,
+      inlineDeleteBranch: false,
+      postMergeDelete: true,
+      reason: 'post-merge-api-delete'
+    };
+  }
+
+  return {
+    requested: true,
+    inlineDeleteBranch: true,
+    postMergeDelete: false,
+    reason: 'inline-gh-delete-branch'
+  };
 }
 
 export function resolveReadyValidationClearancePath({ repoRoot, repo, pr }) {
@@ -286,6 +369,7 @@ export function buildMergeSummaryPayload({
   repo,
   pr,
   mergeMethod,
+  mergeMethodSelection = null,
   selectedMode,
   selectedReason,
   finalMode,
@@ -296,6 +380,7 @@ export function buildMergeSummaryPayload({
   prInfo,
   branchClassTrace = null,
   reviewClearance = null,
+  branchCleanup = null,
   promotion = null,
   planeTransition = null,
   createdAt = new Date().toISOString()
@@ -308,6 +393,7 @@ export function buildMergeSummaryPayload({
     repo,
     pr,
     mergeMethod,
+    mergeMethodSelection,
     selectedMode,
     selectedReason,
     finalMode,
@@ -317,6 +403,7 @@ export function buildMergeSummaryPayload({
     branchClassTrace,
     attempts,
     reviewClearance,
+    branchCleanup,
     prState: {
       state: prInfo?.state ?? null,
       mergeStateStatus: prInfo?.mergeStateStatus ?? null,
@@ -509,6 +596,7 @@ export async function evaluatePromotionReviewClearance({
   repo,
   pr,
   prInfo,
+  copilotReviewStrategy = DEFAULT_COPILOT_REVIEW_STRATEGY,
   runCopilotReviewGateFn = runCopilotReviewGate,
   readReadyValidationClearanceFn = loadReadyValidationClearance,
   pollAttempts = PROMOTION_REVIEW_GATE_POLL_ATTEMPTS,
@@ -605,6 +693,8 @@ export async function evaluatePromotionReviewClearance({
       normalizeBaseRefName(prInfo?.baseRefName),
       '--draft',
       prInfo?.isDraft ? 'true' : 'false',
+      '--copilot-review-strategy',
+      normalizeCopilotReviewStrategy(copilotReviewStrategy),
       '--poll-attempts',
       String(pollAttempts),
       '--poll-delay-ms',
@@ -639,9 +729,9 @@ export async function evaluatePromotionReviewClearance({
   };
 }
 
-export function buildMergeArgs({ pr, repo, method, mode, keepBranch }) {
+export function buildMergeArgs({ pr, repo, method, mode, keepBranch, inlineDeleteBranch = !keepBranch && mode !== 'auto' }) {
   const args = ['pr', 'merge', String(pr), '--repo', repo, `--${method}`];
-  if (!keepBranch && mode !== 'auto') {
+  if (inlineDeleteBranch) {
     args.push('--delete-branch');
   }
   if (mode === 'auto') {
@@ -650,6 +740,268 @@ export function buildMergeArgs({ pr, repo, method, mode, keepBranch }) {
     args.push('--admin');
   }
   return args;
+}
+
+export function normalizeRepositoryMergeCapabilities(payload = {}) {
+  const capabilities = {
+    allowMergeCommit: payload?.allow_merge_commit === true,
+    allowSquashMerge: payload?.allow_squash_merge === true,
+    allowRebaseMerge: payload?.allow_rebase_merge === true
+  };
+  const supportedMethods = MERGE_METHOD_FALLBACK_ORDER.filter((method) => {
+    if (method === 'merge') {
+      return capabilities.allowMergeCommit;
+    }
+    if (method === 'squash') {
+      return capabilities.allowSquashMerge;
+    }
+    if (method === 'rebase') {
+      return capabilities.allowRebaseMerge;
+    }
+    return false;
+  });
+
+  return {
+    ...capabilities,
+    supportedMethods
+  };
+}
+
+export function readRepositoryMergeCapabilities({
+  repoRoot,
+  repo,
+  runGhJsonFn = runGhJson,
+  spawnSyncFn = spawnSync
+} = {}) {
+  const payload = runGhJsonFn(repoRoot, ['api', `repos/${repo}`], { spawnSyncFn }) ?? {};
+  return normalizeRepositoryMergeCapabilities(payload);
+}
+
+export function selectMergeMethod({
+  repo,
+  requestedMethod = 'squash',
+  requestedSource = 'default',
+  capabilities = null
+} = {}) {
+  const normalizedRequested = MERGE_METHODS.has(requestedMethod) ? requestedMethod : 'squash';
+  const supportedMethods = Array.isArray(capabilities?.supportedMethods)
+    ? [...capabilities.supportedMethods]
+    : [];
+
+  if (supportedMethods.length === 0) {
+    throw new Error(`Repository '${repo}' does not allow merge, squash, or rebase merges.`);
+  }
+
+  if (requestedSource === 'cli') {
+    if (!supportedMethods.includes(normalizedRequested)) {
+      throw new Error(
+        `Repository '${repo}' does not allow requested merge method '${normalizedRequested}'. ` +
+          `Supported methods: ${supportedMethods.join(', ')}.`
+      );
+    }
+
+    return {
+      requestedMethod: normalizedRequested,
+      requestedSource,
+      effectiveMethod: normalizedRequested,
+      reason: 'requested-supported',
+      capabilities
+    };
+  }
+
+  if (supportedMethods.includes(normalizedRequested)) {
+    return {
+      requestedMethod: normalizedRequested,
+      requestedSource,
+      effectiveMethod: normalizedRequested,
+      reason: 'default-preferred-supported',
+      capabilities
+    };
+  }
+
+  const fallbackMethod = MERGE_METHOD_FALLBACK_ORDER.find((method) => supportedMethods.includes(method));
+  if (!fallbackMethod) {
+    throw new Error(`Repository '${repo}' does not allow a fallback merge method for '${normalizedRequested}'.`);
+  }
+
+  return {
+    requestedMethod: normalizedRequested,
+    requestedSource,
+    effectiveMethod: fallbackMethod,
+    reason: `default-fallback-${fallbackMethod}`,
+    capabilities
+  };
+}
+
+export function deleteHeadBranchRef({
+  repoRoot,
+  headRepositorySlug = '',
+  headRefName = '',
+  dryRun = false,
+  spawnSyncFn = spawnSync
+} = {}) {
+  if (!headRefName || !headRepositorySlug) {
+    return {
+      requested: true,
+      attempted: false,
+      status: 'skipped',
+      reason: 'missing-head-branch-metadata',
+      repository: headRepositorySlug || null,
+      headRefName: headRefName || null
+    };
+  }
+
+  const apiPath = `repos/${headRepositorySlug}/git/refs/heads/${encodeURIComponent(headRefName)}`;
+  if (dryRun) {
+    console.log(`[priority:merge-sync] dry-run post-merge branch cleanup: gh api -X DELETE ${apiPath}`);
+    return {
+      requested: true,
+      attempted: false,
+      status: 'dry-run',
+      reason: 'post-merge-api-delete',
+      repository: headRepositorySlug,
+      headRefName
+    };
+  }
+
+  const result = spawnSyncFn('gh', ['api', '-X', 'DELETE', apiPath], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const detail = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+  if (result.status === 0) {
+    return {
+      requested: true,
+      attempted: true,
+      status: 'deleted',
+      reason: 'post-merge-api-delete',
+      repository: headRepositorySlug,
+      headRefName
+    };
+  }
+
+  if (/reference does not exist|not found|http 404/i.test(detail)) {
+    return {
+      requested: true,
+      attempted: true,
+      status: 'already-absent',
+      reason: 'post-merge-api-delete',
+      repository: headRepositorySlug,
+      headRefName,
+      detail
+    };
+  }
+
+  throw new Error(
+    `[priority:merge-sync] post-merge branch cleanup failed for ${headRepositorySlug}:${headRefName}: ${
+      detail || `exit ${result.status}`
+    }`
+  );
+}
+
+export function deleteMergedHeadBranch({
+  repoRoot,
+  prInfo,
+  dryRun = false,
+  spawnSyncFn = spawnSync
+} = {}) {
+  return deleteHeadBranchRef({
+    repoRoot,
+    headRepositorySlug: resolveHeadRepositorySlug(prInfo),
+    headRefName: normalizeText(prInfo?.headRefName),
+    dryRun,
+    spawnSyncFn
+  });
+}
+
+function promotionSnapshotToState(snapshot = {}) {
+  return {
+    state: snapshot?.state ?? null,
+    mergeStateStatus: snapshot?.mergeStateStatus ?? null,
+    isInMergeQueue: Boolean(snapshot?.isInMergeQueue),
+    autoMergeRequest: snapshot?.autoMergeEnabled ? { enabledAt: snapshot?.autoMergeEnabledAt ?? true } : null,
+    mergedAt: snapshot?.mergedAt ?? null
+  };
+}
+
+export function hasDeferredPostMergeBranchCleanup(summary = {}) {
+  const requested = Boolean(summary?.branchCleanup?.requested);
+  const deferred = normalizeLower(summary?.branchCleanup?.status) === 'deferred';
+  const plannedPostMergeDelete = Boolean(summary?.branchCleanup?.postMergeDelete);
+  const legacyAutoDeferred = normalizeLower(summary?.finalMode) === 'auto' &&
+    !Boolean(summary?.branchCleanup?.inlineDeleteBranch);
+  return requested && deferred && (plannedPostMergeDelete || legacyAutoDeferred);
+}
+
+export async function reconcileDeferredBranchCleanup({
+  repoRoot = getRepoRoot(),
+  summary = null,
+  readPromotionStateFn = readPromotionState,
+  readPrInfoFn = readPrInfo,
+  deleteHeadBranchRefFn = deleteHeadBranchRef,
+  dryRun = false,
+  observedAt = new Date().toISOString()
+} = {}) {
+  if (!hasDeferredPostMergeBranchCleanup(summary)) {
+    return {
+      changed: false,
+      status: 'not-applicable',
+      summary
+    };
+  }
+
+  const repo = normalizeText(summary?.repo);
+  const pr = Number(summary?.pr);
+  if (!repo || !Number.isInteger(pr) || pr <= 0) {
+    throw new Error('Deferred branch cleanup reconciliation requires summary.repo and summary.pr.');
+  }
+
+  const latestPromotionState = readPromotionStateFn({ repoRoot, repo, pr });
+  const promotion = {
+    ...classifyPromotionState(promotionSnapshotToState(summary?.promotion?.initial), latestPromotionState, {
+      finalMode: normalizeText(summary?.finalMode) || 'auto'
+    }),
+    observedAt,
+    pollAttemptsUsed: 0
+  };
+
+  if (!(promotion.materialized && ['merged', 'already-merged'].includes(promotion.status))) {
+    return {
+      changed: false,
+      status: 'deferred',
+      summary,
+      promotion
+    };
+  }
+
+  let headRepositorySlug = normalizeText(summary?.branchCleanup?.repository);
+  let headRefName = normalizeText(summary?.branchCleanup?.headRefName);
+  if (!headRepositorySlug || !headRefName) {
+    const prInfo = readPrInfoFn({ repoRoot, repo, pr });
+    headRepositorySlug ||= resolveHeadRepositorySlug(prInfo);
+    headRefName ||= normalizeText(prInfo?.headRefName);
+  }
+
+  const branchCleanup = deleteHeadBranchRefFn({
+    repoRoot,
+    headRepositorySlug,
+    headRefName,
+    dryRun
+  });
+
+  return {
+    changed: true,
+    status: branchCleanup.status === 'dry-run' ? 'dry-run' : 'completed',
+    summary: {
+      ...summary,
+      promotion,
+      branchCleanup,
+      reconciledAt: observedAt
+    },
+    promotion,
+    branchCleanup
+  };
 }
 
 async function verifyPromotionActivation({
@@ -720,6 +1072,7 @@ async function maybeWriteSummary(summaryPath, payload) {
     return;
   }
   const resolved = path.resolve(summaryPath);
+  await mkdir(path.dirname(resolved), { recursive: true });
   await writeFile(resolved, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   console.log(`[priority:merge-sync] wrote summary: ${resolved}`);
 }
@@ -733,7 +1086,10 @@ export async function runMergeSync({
   readPromotionStateFn = readPromotionState,
   sleepFn = delay,
   runMergeAttemptFn = runMergeAttempt,
-  evaluatePromotionReviewClearanceFn = evaluatePromotionReviewClearance
+  evaluatePromotionReviewClearanceFn = evaluatePromotionReviewClearance,
+  deleteMergedHeadBranchFn = deleteMergedHeadBranch,
+  loadMergeSyncCopilotReviewStrategyFn = loadMergeSyncCopilotReviewStrategy,
+  readRepositoryMergeCapabilitiesFn = readRepositoryMergeCapabilities
 } = {}) {
   const options = parseArgs(argv);
 
@@ -742,11 +1098,22 @@ export async function runMergeSync({
     const upstream = resolveUpstreamFn(repoRoot);
     return `${upstream.owner}/${upstream.repo}`;
   })();
+  const repositoryMergeCapabilities = readRepositoryMergeCapabilitiesFn({
+    repoRoot,
+    repo: resolvedRepo
+  });
+  const mergeMethodSelection = selectMergeMethod({
+    repo: resolvedRepo,
+    requestedMethod: options.method,
+    requestedSource: options.methodExplicit ? 'cli' : 'default',
+    capabilities: repositoryMergeCapabilities
+  });
 
   const policyRaw = await readFile(manifestPath, 'utf8');
   const policy = JSON.parse(policyRaw);
   const mergeQueueBranches = getMergeQueueBranches(policy);
   const branchClassContract = loadBranchClassContract(repoRoot);
+  const copilotReviewStrategy = await loadMergeSyncCopilotReviewStrategyFn({ repoRoot });
 
   const prInfo = readPrInfoFn({
     repoRoot,
@@ -797,7 +1164,8 @@ export async function runMergeSync({
           repoRoot,
           repo: resolvedRepo,
           pr: options.pr,
-          prInfo
+          prInfo,
+          copilotReviewStrategy
         });
   const initialPromotionState =
     selection.mode === 'none'
@@ -814,8 +1182,15 @@ export async function runMergeSync({
           pr: options.pr
         });
   console.log(
-    `[priority:merge-sync] selected mode=${selection.mode} reason=${selection.reason} mergeState=${prInfo.mergeStateStatus ?? 'n/a'}`
+    `[priority:merge-sync] selected mode=${selection.mode} reason=${selection.reason} mergeState=${prInfo.mergeStateStatus ?? 'n/a'} mergeMethod=${mergeMethodSelection.effectiveMethod} methodReason=${mergeMethodSelection.reason}`
   );
+  let branchCleanupPlan = resolveBranchCleanupPlan({
+    keepBranch: options.keepBranch,
+    mode: selection.mode,
+    baseRefName: prInfo?.baseRefName,
+    mergeQueueBranches,
+    baseBranchClass
+  });
 
   if (!reviewClearance?.ok) {
     const reasons = Array.isArray(reviewClearance?.report?.reasons) ? reviewClearance.report.reasons : [];
@@ -833,9 +1208,10 @@ export async function runMergeSync({
     const initialArgs = buildMergeArgs({
       pr: options.pr,
       repo: resolvedRepo,
-      method: options.method,
+      method: mergeMethodSelection.effectiveMethod,
       mode: selection.mode,
-      keepBranch: options.keepBranch
+      keepBranch: options.keepBranch,
+      inlineDeleteBranch: branchCleanupPlan.inlineDeleteBranch
     });
     const initialResult = runMergeAttemptFn({ repoRoot, args: initialArgs, dryRun: options.dryRun });
     attempts.push({
@@ -857,9 +1233,17 @@ export async function runMergeSync({
         const retryArgs = buildMergeArgs({
           pr: options.pr,
           repo: resolvedRepo,
-          method: options.method,
+          method: mergeMethodSelection.effectiveMethod,
           mode: 'auto',
-          keepBranch: options.keepBranch
+          keepBranch: options.keepBranch,
+          inlineDeleteBranch: false
+        });
+        branchCleanupPlan = resolveBranchCleanupPlan({
+          keepBranch: options.keepBranch,
+          mode: 'auto',
+          baseRefName: prInfo?.baseRefName,
+          mergeQueueBranches,
+          baseBranchClass
         });
         const retryResult = runMergeAttemptFn({ repoRoot, args: retryArgs, dryRun: options.dryRun });
         attempts.push({
@@ -909,10 +1293,48 @@ export async function runMergeSync({
     });
   }
 
+  let branchCleanup = {
+    requested: branchCleanupPlan.requested,
+    attempted: false,
+    status: branchCleanupPlan.requested ? 'deferred' : 'kept',
+    reason: branchCleanupPlan.reason,
+    inlineDeleteBranch: branchCleanupPlan.inlineDeleteBranch,
+    postMergeDelete: branchCleanupPlan.postMergeDelete,
+    repository: resolveHeadRepositorySlug(prInfo) || null,
+    headRefName: normalizeText(prInfo?.headRefName) || null
+  };
+  if (branchCleanupPlan.inlineDeleteBranch) {
+    branchCleanup = {
+      ...branchCleanup,
+      status: options.dryRun ? 'dry-run-inline' : 'inline-requested'
+    };
+  } else if (branchCleanupPlan.postMergeDelete) {
+    if (options.dryRun) {
+      branchCleanup = deleteMergedHeadBranchFn({
+        repoRoot,
+        prInfo,
+        dryRun: true
+      });
+    } else if (promotion.materialized && ['merged', 'already-merged'].includes(promotion.status)) {
+      branchCleanup = deleteMergedHeadBranchFn({
+        repoRoot,
+        prInfo,
+        dryRun: false
+      });
+    } else {
+      branchCleanup = {
+        ...branchCleanup,
+        status: 'deferred',
+        reason: 'promotion-not-yet-merged'
+      };
+    }
+  }
+
   const payload = buildMergeSummaryPayload({
     repo: resolvedRepo,
     pr: options.pr,
-    mergeMethod: options.method,
+    mergeMethod: mergeMethodSelection.effectiveMethod,
+    mergeMethodSelection,
     selectedMode: selection.mode,
     selectedReason: selection.reason,
     finalMode,
@@ -926,6 +1348,7 @@ export async function runMergeSync({
       baseBranchClass
     }),
     reviewClearance: reviewClearance?.report ?? null,
+    branchCleanup,
     promotion,
     planeTransition
   });

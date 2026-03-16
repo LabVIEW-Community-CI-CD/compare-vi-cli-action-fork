@@ -119,15 +119,25 @@ $requiredRelativePaths = @(
   'tools/CompareVI.Tools/CompareVI.Tools.psd1',
   'tools/CompareVI.Tools/CompareVI.Tools.psm1',
   'tools/Assert-DockerRuntimeDeterminism.ps1',
+  'tools/Build-VIHistoryDevImage.ps1',
   'tools/Compare-ExitCodeClassifier.ps1',
+  'tools/HostRamBudget.psm1',
   'tools/Compare-VIHistory.ps1',
   'tools/Compare-RefsToTemp.ps1',
   'tools/Invoke-LVCompare.ps1',
+  'tools/Invoke-NILinuxReviewSuite.ps1',
+  'tools/Invoke-VIHistoryLocalRefinement.ps1',
+  'tools/Invoke-VIHistoryLocalOperatorSession.ps1',
+  'tools/Manage-VIHistoryRuntimeInDocker.ps1',
   'tools/New-CompareVIHistoryDiagnosticsBody.ps1',
   'tools/Render-VIHistoryReport.ps1',
+  'tools/Run-NIWindowsContainerCompare.ps1',
   'tools/Run-NILinuxContainerCompare.ps1',
+  'tools/Test-WindowsNI2026q1HostPreflight.ps1',
   'tools/VendorTools.psm1',
   'tools/VICategoryBuckets.psm1',
+  'tools/priority/host-ram-budget.mjs',
+  'tools/docker/Dockerfile.vi-history-dev',
   'tools/Stage-CompareInputs.ps1',
   'scripts/CompareVI.psm1',
   'scripts/ArgTokenization.psm1'
@@ -227,6 +237,10 @@ try {
     '- For cross-repo VI history, extract the archive and import the module from this bundle instead of checking out the full repository.'
     '- Prefer `Invoke-CompareVIHistoryFacade` when downstream tooling needs a stable summary object plus the generated report paths.'
     '- For comparevi-history comment/summary rendering, resolve `tools/New-CompareVIHistoryDiagnosticsBody.ps1` from this bundle or from the workflow `tooling-path` output instead of copying inline PowerShell helpers.'
+    '- For local-first VI history refinement, use `tools/Build-VIHistoryDevImage.ps1`, `tools/Invoke-VIHistoryLocalRefinement.ps1`, and `tools/Manage-VIHistoryRuntimeInDocker.ps1` from this bundle root.'
+    '- For Windows mirror proof on a Windows host, keep `tools/Test-WindowsNI2026q1HostPreflight.ps1` and `tools/Run-NIWindowsContainerCompare.ps1` adjacent in the extracted bundle; `windows-mirror-proof` is pinned to `nationalinstruments/labview:2026q1-windows`.'
+    '- For a unified local operator shell, use `tools/Invoke-VIHistoryLocalOperatorSession.ps1` or the exported `Invoke-CompareVIHistoryLocalOperatorSessionFacade` wrapper from this bundle.'
+    '- The first documented downstream local-first consumer is `LabVIEW-Community-CI-CD/labview-icon-editor-demo` via comparevi-history local-review/local-proof targeting `develop`.'
     '- The runtime facade JSON is written to `history-summary.json` under the selected results directory.'
     '- Real compare execution still requires the same LVCompare/LabVIEW prerequisites as the source repository.'
   ) | Set-Content -LiteralPath $bundleReadmePath -Encoding utf8
@@ -261,6 +275,8 @@ try {
       'cross-repo-vi-history-via-module',
       'cross-repo-vi-history-via-facade',
       'cross-repo-vi-history-via-hosted-ni-linux-runner',
+      'local-vi-history-refinement-via-runtime-profiles',
+      'local-vi-history-operator-session-via-runtime-and-review-hooks',
       'comparevi-history-comment-rendering-via-tooling-path'
     )
     requires = @(
@@ -303,6 +319,78 @@ try {
         'When source-branch budgeting is requested, the facade also records the evaluated branch budget so downstream consumers can audit the safeguard without parsing raw git state.'
       )
     }
+    localRuntimeProfiles = [ordered]@{
+      schema = 'comparevi-tools/local-refinement-facade@v1'
+      schemaUrl = 'https://labview-community-ci-cd.github.io/compare-vi-cli-action/schemas/comparevi-tools-local-refinement-facade-v1.schema.json'
+      exportedFunction = 'Invoke-CompareVIHistoryLocalRefinementFacade'
+      resultsRelativePath = 'local-refinement.json'
+      benchmarkRelativePath = 'local-refinement-benchmark.json'
+      runtimeProfiles = @(
+        'proof',
+        'dev-fast',
+        'warm-dev',
+        'windows-mirror-proof'
+      )
+      defaultProfile = 'dev-fast'
+      stableFields = @(
+        'runtimeProfile',
+        'runtimePlane',
+        'image',
+        'toolSource',
+        'cacheReuseState',
+        'coldWarmClass',
+        'benchmarkSampleKind',
+        'timings',
+        'history',
+        'reviewSuite',
+        'reviewLoop',
+        'hostRamBudget',
+        'windowsMirror',
+        'warmRuntime',
+        'artifacts',
+        'finalStatus'
+      )
+      notes = @(
+        'Use the module facade when comparevi-history or another downstream needs profile-aware local refinement without hard-coding backend script paths.',
+        'The facade defaults RepoRoot to the caller working directory so extracted tooling bundles can target downstream repositories cleanly.',
+        'Proof stays the canonical runtime truth; dev-fast and warm-dev are local acceleration planes only.',
+        'windows-mirror-proof is the first Windows mirror plane and exists to validate a repeatable headless Windows container surface before any host-native 32-bit promotion.',
+        'The first documented downstream adoption proof is LabVIEW-Community-CI-CD/labview-icon-editor-demo via comparevi-history local-review/local-proof targeting develop.'
+      )
+    }
+    localOperatorSession = [ordered]@{
+      schema = 'comparevi-tools/local-operator-session-facade@v1'
+      schemaUrl = 'https://labview-community-ci-cd.github.io/compare-vi-cli-action/schemas/comparevi-tools-local-operator-session-facade-v1.schema.json'
+      exportedFunction = 'Invoke-CompareVIHistoryLocalOperatorSessionFacade'
+      resultsRelativePath = 'local-operator-session.json'
+      runtimeProfiles = @(
+        'proof',
+        'dev-fast',
+        'warm-dev',
+        'windows-mirror-proof'
+      )
+      defaultProfile = 'dev-fast'
+      stableFields = @(
+        'runtimeProfile',
+        'runtimePlane',
+        'repoRoot',
+        'resultsRoot',
+        'hostRamBudget',
+        'localRefinement',
+        'review.status',
+        'review.commandPath',
+        'review.outputs',
+        'artifacts',
+        'finalStatus',
+        'failure'
+      )
+      notes = @(
+        'Use the operator-session facade when a downstream wants one local command surface that composes runtime execution with an optional review hook.',
+        'The session contract records the existing local-refinement receipt plus downstream review output paths without moving review-compiler ownership into this repository.',
+        'comparevi-history should consume this seam rather than recreating runtime orchestration.',
+        'windows-mirror-proof is proof-only in this first slice; Windows acceleration and warm runtime reuse remain follow-on work.'
+      )
+    }
     diagnosticsCommentRenderer = [ordered]@{
       entryScriptPath = 'tools/New-CompareVIHistoryDiagnosticsBody.ps1'
       variants = @(
@@ -324,7 +412,9 @@ try {
       defaultImage = 'nationalinstruments/labview:2026q1-linux'
       notes = @(
         'Hosted Linux consumers can resolve the runner from COMPAREVI_SCRIPTS_ROOT without a full backend checkout.',
-        'Keep the entry script and support scripts adjacent inside the extracted bundle so runtime guard and exit-code classification remain available.'
+        'Keep the entry script and support scripts adjacent inside the extracted bundle so runtime guard and exit-code classification remain available.',
+        'The same extracted bundle also carries the local-only VI history acceleration surfaces (`Build-VIHistoryDevImage.ps1`, `Invoke-VIHistoryLocalRefinement.ps1`, `Invoke-VIHistoryLocalOperatorSession.ps1`, and `Manage-VIHistoryRuntimeInDocker.ps1`) for downstream local refinement loops.',
+        'The first Windows mirror proof slice also ships `Test-WindowsNI2026q1HostPreflight.ps1` and `Run-NIWindowsContainerCompare.ps1` so Windows-host consumers can validate the pinned headless NI image without a full backend checkout.'
       )
     }
   }

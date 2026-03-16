@@ -86,6 +86,14 @@ Notes:
 - Output defaults to `tests/results/ni-windows-container/compare-report.html` with deterministic capture logs.
 - Capture JSON (`ni-windows-container-capture.json`) records machine-readable classification fields
   (`classification`, `labviewCliErrorCode`, `recommendation`, `reportExists`) for deterministic triage.
+- The `windows-mirror-proof` local VI-history profile is pinned to this same image and is proof-only in the first
+  slice; it is not a warm or accelerated lane.
+- Hosted CI now has a matching non-required Windows proof lane in `Validate`:
+  `vi-history-scenarios-windows`. It runs on GitHub-hosted `windows-2022`, bootstraps
+  `nationalinstruments/labview:2026q1-windows`, and uses the same canonical in-container LabVIEW path:
+  `C:\Program Files\National Instruments\LabVIEW 2026\LabVIEW.exe`.
+- Expect the hosted Windows image pull to be materially slower than the Linux lane.
+  Agents can dispatch the hosted lane while manually running the Linux or Windows Docker Desktop/WSL2 lanes on this host.
 
 ### NI 2026 q1 host bootstrap preflight
 
@@ -108,10 +116,11 @@ Common remediation:
 ## Tooling helpers
 
 | Variable | Purpose |
-| -------- | ------- |
+| --- | --- |
 | `COMPAREVI_TOOLS_IMAGE` | Default image when `-UseToolsImage` is set without `-ToolsImageTag`. |
-|                          | Used by `tools/Run-NonLVChecksInDocker.ps1`. |
-|                          | Example: `ghcr.io/labview-community-ci-cd/comparevi-tools:latest`. |
+| | Used by `tools/Run-NonLVChecksInDocker.ps1`. |
+| | Example: `ghcr.io/labview-community-ci-cd/comparevi-tools:latest`. |
+| | Mutable tags like `latest` are not sufficient freshness evidence by themselves; repo tooling now forces pull-or-digest evidence before treating them as stale. |
 
 ## Schema locations
 
@@ -122,11 +131,10 @@ Common remediation:
 ## Runbook & fixture reporting
 
 | Variable | Purpose |
-| -------- | ------- |
+| --- | --- |
 | `RUNBOOK_LOOP_ITERATIONS`, `RUNBOOK_LOOP_QUICK`, `RUNBOOK_LOOP_FAIL_ON_DIFF` | Integration runbook knobs |
 | `FAIL_ON_NEW_STRUCTURAL`, `SUMMARY_VERBOSE` | Fixture reporting strictness |
 | `DELTA_FORCE_V2`, `DELTA_SCHEMA_VERSION` | Fixture delta schema selection |
 
 Use workflow inputs for most toggles; fall back to env variables for local runs and CI
 experiments. Unknown variables are ignored.
-

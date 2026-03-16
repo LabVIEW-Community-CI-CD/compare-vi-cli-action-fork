@@ -2,7 +2,9 @@
 # Cross-Repo VI History Capture
 
 This note records the supported steps for exercising the Compare-VIHistory
-tooling against an external repository. The pinned sample below uses
+tooling against an external repository. The canonical local-first downstream
+adoption proof uses `LabVIEW-Community-CI-CD/labview-icon-editor-demo` on
+`develop`, while the legacy one-off module sample below still uses
 `svelderrainruiz/labview-icon-editor`, which is the active downstream icon
 editor repository.
 
@@ -160,7 +162,65 @@ pwsh -NoLogo -NoProfile -File tools/Run-NILinuxContainerCompare.ps1 `
 }
 ```
 
-## Pinned sample flow
+## Canonical downstream demo adoption
+
+Treat `LabVIEW-Community-CI-CD/labview-icon-editor-demo` as the first
+documented downstream consumer for the local-first VI history loop.
+
+- Backend pin: reviewed `compare-vi-cli-action` release tag plus
+  `comparevi-tools-release.json`
+- Facade pin: immutable `comparevi-history` release used by the consumer
+  workflows and local-review scripts
+- Downstream repo: `LabVIEW-Community-CI-CD/labview-icon-editor-demo`
+- PR workflow target branch: `develop`
+- Downstream maintainer doc:
+  `docs/comparevi-history-diagnostics.md`
+- Representative VI:
+  `Tooling/deployment/VIP_Post-Install Custom Action.vi`
+
+For that repo, the supported local maintainer loop is:
+
+1. refine locally with `dev-fast`
+2. repeat locally with `warm-dev` when iteration is high-frequency
+3. run `proof` before opening the PR
+4. use GitHub CI only for publication and trust-boundary proof
+
+Example local review from a `comparevi-history` checkout:
+
+```powershell
+pwsh -NoLogo -NoProfile -File <comparevi-history-root>\scripts\Invoke-CompareVIHistoryLocalReview.ps1 `
+  -ConsumerRepositoryRoot <labview-icon-editor-demo-root> `
+  -ViPath 'Tooling/deployment/VIP_Post-Install Custom Action.vi'
+```
+
+Example repeated-turn warm runtime:
+
+```powershell
+pwsh -NoLogo -NoProfile -File <comparevi-history-root>\scripts\Invoke-CompareVIHistoryLocalReview.ps1 `
+  -ConsumerRepositoryRoot <labview-icon-editor-demo-root> `
+  -ViPath 'Tooling/deployment/VIP_Post-Install Custom Action.vi' `
+  -Profile warm-dev `
+  -WarmRuntimeDir tests/results/local-review/runtime `
+  -BaseRef develop `
+  -HeadRef HEAD
+```
+
+Example local proof before opening the PR:
+
+```powershell
+pwsh -NoLogo -NoProfile -File <comparevi-history-root>\scripts\Invoke-CompareVIHistoryLocalReview.ps1 `
+  -ConsumerRepositoryRoot <labview-icon-editor-demo-root> `
+  -ViPath 'Tooling/deployment/VIP_Post-Install Custom Action.vi' `
+  -Profile proof `
+  -BaseRef develop `
+  -HeadRef HEAD
+```
+
+Keep the checked-in GitHub workflows in the downstream repo as the publication
+surface. The local-first loop is for reviewer/runtime refinement before the PR
+exists, not a replacement for the published PR diagnostics.
+
+## Legacy module sample flow
 
 Use this exact sample when you need a documented cross-repo consumer reference:
 
@@ -180,6 +240,132 @@ also advertises
 which comparevi-history consumers can resolve from the extracted tooling root
 or workflow `tooling-path` output instead of copying inline PowerShell comment
 renderers.
+
+## Local-first acceleration planes
+
+Cross-repo maintainers should now separate local refinement speed from canonical
+proof:
+
+- `proof`
+  - image: `nationalinstruments/labview:2026q1-linux`
+  - purpose: release parity and CI truth
+- `windows-mirror-proof`
+  - image: `nationalinstruments/labview:2026q1-windows`
+  - purpose: repeatable headless Windows mirror proof on a Windows host before
+    any host-native LabVIEW 2026 32-bit promotion
+- `dev-fast`
+  - image: `comparevi-vi-history-dev:local`
+  - purpose: faster cold local refinement with a mounted working tree and
+    prewarmed dependencies
+- `warm-dev`
+  - same local dev image
+  - purpose: repeated local turns against one long-lived Docker runtime
+
+This split is deliberate:
+
+- `comparevi-tools` stays the non-LV/tools image only
+- the local dev image is not published in the first slice
+- CI and release workflows keep advertising only the canonical NI image
+- `windows-mirror-proof` is proof-only in this first slice and stays pinned to
+  `nationalinstruments/labview:2026q1-windows`
+
+### Backend local entrypoints
+
+Use the backend runtime substrate from this repo:
+
+```powershell
+node tools/npm/run-script.mjs history:local:build-dev-image
+node tools/npm/run-script.mjs history:local:refine -- `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+node tools/npm/run-script.mjs history:local:proof -- `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+node tools/npm/run-script.mjs history:local:windows-mirror:proof -- `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+node tools/npm/run-script.mjs history:local:warm-runtime -- `
+  -RepoRoot . `
+  -ResultsRoot tests/results/local-vi-history/warm-dev `
+  -RuntimeDir tests/results/local-vi-history/runtime/warm-dev
+```
+
+Direct PowerShell entrypoints are:
+
+- `tools/Build-VIHistoryDevImage.ps1`
+- `tools/Invoke-VIHistoryLocalRefinement.ps1`
+- `tools/Invoke-VIHistoryLocalOperatorSession.ps1`
+- `tools/Manage-VIHistoryRuntimeInDocker.ps1`
+- `tools/Test-WindowsNI2026q1HostPreflight.ps1`
+- `tools/Run-NIWindowsContainerCompare.ps1`
+
+The local receipts are:
+
+- `comparevi/local-refinement@v1`
+- `comparevi/local-runtime-state@v1`
+- `comparevi/local-runtime-health@v1`
+- `comparevi/local-refinement-benchmark@v1`
+- `comparevi/local-operator-session@v1`
+
+Windows mirror proof also records host/image evidence under the local
+refinement and operator-session receipts:
+
+- `runtimePlane = windows-mirror`
+- `windowsMirror.hostPreflight.path`
+- `windowsMirror.compare.reportPath`
+- `windowsMirror.compare.capturePath`
+- `windowsMirror.compare.runtimeSnapshotPath`
+
+Those receipts are the contract `comparevi-history` should consume when it adds
+profile-aware `local-review` and `local-proof` surfaces on top of the backend
+runtime planes.
+
+Use the operator-session contract when one local command needs to compose the
+runtime plane with a downstream review hook. The session manifest records:
+
+- the underlying local-refinement receipt
+- benchmark selection and warm-runtime artifacts
+- optional downstream review output paths such as a review bundle, workspace,
+  preview manifest, or review receipt
+- the final composed session status
+
+The session wrapper sets stable environment variables for downstream review
+hooks, including:
+
+- `COMPAREVI_LOCAL_REFINEMENT_RECEIPT_PATH`
+- `COMPAREVI_LOCAL_REFINEMENT_BENCHMARK_PATH`
+- `COMPAREVI_LOCAL_REFINEMENT_RESULTS_ROOT`
+- `COMPAREVI_LOCAL_OPERATOR_SESSION_PATH`
+- `COMPAREVI_REVIEW_RECEIPT_PATH`
+- `COMPAREVI_REVIEW_BUNDLE_PATH`
+- `COMPAREVI_REVIEW_WORKSPACE_HTML_PATH`
+- `COMPAREVI_REVIEW_WORKSPACE_MARKDOWN_PATH`
+- `COMPAREVI_REVIEW_PREVIEW_MANIFEST_PATH`
+- `COMPAREVI_REVIEW_RUN_PATH`
+
+For extracted tooling bundles, prefer the module-level stable surface instead
+of hard-coding backend script paths:
+
+- `Invoke-CompareVIHistoryLocalRefinementFacade`
+- `Invoke-CompareVIHistoryLocalOperatorSessionFacade`
+- consumer contract:
+  `comparevi-tools/local-refinement-facade@v1`
+  and `comparevi-tools/local-operator-session-facade@v1`
+
+### Recommended downstream workflow
+
+For a downstream maintainer, the intended loop is now:
+
+1. refine a VI-history change locally with `dev-fast`
+2. repeat locally with `warm-dev` when the turn frequency is high
+3. run `proof` before opening the PR
+4. use GitHub CI only for publication and trust-boundary proof
+
+That keeps sticky comment, preview publication, and trust-split validation in
+GitHub while moving parser/renderer/runtime iteration off the PR churn path.
 
 ## One-off local run from a source checkout (legacy / maintainer path)
 

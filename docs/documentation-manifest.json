@@ -2,7 +2,7 @@
   "$schema": "./schemas/documentation-manifest-v1.schema.json",
   "schema": "documentation-manifest-v1",
   "version": "1.0.0",
-  "updated": "2026-03-15T12:20:00Z",
+  "updated": "2026-03-20T19:44:05.8724152Z",
   "entries": [
     {
       "name": "Root Entry Points",
@@ -60,9 +60,12 @@
         "docs/knowledgebase/FEATURE_BRANCH_POLICY.md",
         "docs/knowledgebase/LVCompare-Git-CLI-Guide_Windows-LabVIEW-2025Q3.md",
         "docs/knowledgebase/CrossRepo-VIHistory.md",
+        "docs/knowledgebase/Cookiecutter-Certification-Scaffolds.md",
         "docs/knowledgebase/GitHub-Intake-Layer.md",
         "docs/knowledgebase/GitHub-Wiki-Portal-Automation-Evaluation.md",
         "docs/knowledgebase/GitHub-Wiki-Portal.md",
+        "docs/knowledgebase/Headless-SampleVI-Corpus.md",
+        "docs/knowledgebase/PrintToSingleFileHtml-Provenance.md",
         "docs/knowledgebase/Offline-RealHistory-Corpus.md",
         "docs/knowledgebase/DOCKER_TOOLS_PARITY.md",
         "docs/LABVIEW_GATING.md",
@@ -206,14 +209,87 @@
       ]
     },
     {
+      "name": "Headless Sample Corpus Contracts",
+      "category": "supporting",
+      "status": "reference",
+      "description": "Checked-in catalog, schemas, evaluator, focused tests, and operation-payload provenance guidance for the evidence-backed public sample VI corpus used by headless certification lanes.",
+      "files": [
+        "docs/knowledgebase/Headless-SampleVI-Corpus.md",
+        "docs/knowledgebase/PrintToSingleFileHtml-Provenance.md",
+        "docs/schemas/headless-sample-vi-corpus-targets-v1.schema.json",
+        "docs/schemas/headless-sample-vi-corpus-evaluation-v1.schema.json",
+        "fixtures/headless-corpus/sample-vi-corpus.targets.json",
+        "tools/Invoke-HeadlessSampleVICorpusEvaluation.ps1",
+        "tests/Invoke-HeadlessSampleVICorpusEvaluation.Tests.ps1"
+      ]
+    },
+    {
+      "name": "Cookiecutter Scaffold Contracts",
+      "category": "supporting",
+      "status": "reference",
+      "description": "Pinned cookiecutter catalog, schemas, wrapper, focused tests, and template trees for generating reviewable scenario-pack and certification corpus scaffold outputs.",
+      "files": [
+        "docs/knowledgebase/Cookiecutter-Certification-Scaffolds.md",
+        "docs/schemas/comparevi-cookiecutter-scaffold-v1.schema.json",
+        "docs/schemas/comparevi-cookiecutter-template-catalog-v1.schema.json",
+        "tests/New-CompareVICookiecutterScaffold.Tests.ps1",
+        "tools/New-CompareVICookiecutterScaffold.ps1",
+        "tools/cookiecutter/run-cookiecutter.py",
+        "tools/policy/comparevi-cookiecutter-templates.json"
+      ],
+      "include": [
+        "tools/cookiecutter/templates/**/*"
+      ]
+    },
+    {
+      "name": "LabVIEW CLI Custom Operation Scaffold Contracts",
+      "category": "supporting",
+      "status": "reference",
+      "description": "Disposable workspace scaffold, receipt schema, focused tests, and guidance for bootstrapping repo-owned LabVIEW CLI custom operation authoring from NI's installed AddTwoNumbers example without vendoring NI files.",
+      "files": [
+        "docs/knowledgebase/LabVIEWCLI-CustomOperation-Scaffold.md",
+        "docs/schemas/labview-cli-custom-operation-scaffold-v1.schema.json",
+        "tools/New-LabVIEWCLICustomOperationWorkspace.ps1",
+        "tests/New-LabVIEWCLICustomOperationWorkspace.Tests.ps1"
+      ]
+    },
+    {
+      "name": "LabVIEW CLI Custom Operation Proof Contracts",
+      "category": "supporting",
+      "status": "reference",
+      "description": "Fail-closed AddTwoNumbers proof helpers, analysis module, receipt schema, focused tests, and guidance for investigating LabVIEWCLI custom-operation hangs and path drift across the LabVIEW 2026 host plane and the pinned Windows container mirror plane.",
+      "files": [
+        "docs/knowledgebase/LabVIEWCLI-CustomOperation-Proof.md",
+        "docs/schemas/labview-cli-custom-operation-proof-v1.schema.json",
+        "tools/LabVIEWCLICustomOperationProof.psm1",
+        "tools/Run-NIWindowsContainerCustomOperation.ps1",
+        "tools/Test-LabVIEWCLICustomOperationProof.ps1",
+        "tests/LabVIEWCLICustomOperationProof.Tests.ps1",
+        "tests/Run-NIWindowsContainerCustomOperation.Tests.ps1"
+      ]
+    },
+    {
       "name": "Host Plane Diagnostics Contracts",
       "category": "supporting",
       "status": "reference",
-      "description": "Machine-readable report and summary contracts, helper entrypoints, fast-loop provenance surfaces, and the single-host runbook for the LabVIEW 2026 host-plane split.",
+      "description": "Machine-readable report and summary contracts, VI-history local runtime-plane receipts, helper entrypoints, fast-loop provenance surfaces, and the single-host runbook for the LabVIEW 2026 host-plane split.",
       "files": [
         "docs/DEVELOPER_GUIDE.md",
         "docs/SINGLE_HOST_LABVIEW_2026_PLANES.md",
+        "docs/schemas/comparevi-local-refinement-v1.schema.json",
+        "docs/schemas/comparevi-local-refinement-benchmark-v1.schema.json",
+        "docs/schemas/comparevi-local-operator-session-v1.schema.json",
+        "docs/schemas/comparevi-tools-local-refinement-facade-v1.schema.json",
+        "docs/schemas/comparevi-tools-local-operator-session-facade-v1.schema.json",
+        "docs/schemas/comparevi-local-runtime-health-v1.schema.json",
+        "docs/schemas/comparevi-local-runtime-lease-v1.schema.json",
+        "docs/schemas/comparevi-local-runtime-state-v1.schema.json",
         "docs/schemas/labview-2026-host-plane-report-v1.schema.json",
+        "tests/VIHistoryLocalAcceleration.Tests.ps1",
+        "tools/Build-VIHistoryDevImage.ps1",
+        "tools/Invoke-VIHistoryLocalOperatorSession.ps1",
+        "tools/Invoke-VIHistoryLocalRefinement.ps1",
+        "tools/Manage-VIHistoryRuntimeInDocker.ps1",
         "tools/LabVIEW2026HostPlaneDiagnostics.psm1",
         "tools/Show-DockerFastLoopDiagnostics.ps1",
         "tools/Test-DockerDesktopFastLoop.ps1",

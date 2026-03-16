@@ -335,26 +335,344 @@ function Read-JsonHashtable {
   return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable)
 }
 
+function Get-ActionlintVersionFloor {
+  param([Parameter(Mandatory)][string]$RepoRoot)
+
+  $dockerfilePath = Join-Path $RepoRoot 'tools' 'docker' 'Dockerfile.tools'
+  if (-not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
+    throw ("Tools Dockerfile not found while resolving actionlint floor: {0}" -f $dockerfilePath)
+  }
+
+  $dockerfileContent = Get-Content -LiteralPath $dockerfilePath -Raw
+  $match = [regex]::Match($dockerfileContent, '(?m)^ARG ACTIONLINT_VERSION=(\d+\.\d+\.\d+)\s*$')
+  if (-not $match.Success) {
+    throw ("Unable to resolve ACTIONLINT_VERSION from {0}" -f $dockerfilePath)
+  }
+
+  return [string]$match.Groups[1].Value
+}
+
+function Test-ActionlintVersionAtLeast {
+  param(
+    [AllowEmptyString()][string]$Version,
+    [Parameter(Mandatory)][string]$MinimumVersion
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Version)) {
+    return $false
+  }
+
+  try {
+    return ([version]$Version) -ge ([version]$MinimumVersion)
+  } catch {
+    return $false
+  }
+}
+
+function Invoke-DockerCliCapture {
+  param([Parameter(Mandatory)][string[]]$Arguments)
+
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = 'docker'
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  foreach ($arg in @($Arguments)) {
+    [void]$psi.ArgumentList.Add([string]$arg)
+  }
+
+  $proc = [System.Diagnostics.Process]::new()
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    $global:LASTEXITCODE = [int]$proc.ExitCode
+    return [pscustomobject]@{
+      exitCode = [int]$proc.ExitCode
+      stdout = $stdout
+      stderr = $stderr
+    }
+  } finally {
+    $proc.Dispose()
+  }
+}
+
+function Test-IsMutableToolsImageReference {
+  param([AllowEmptyString()][string]$Image)
+
+  if ([string]::IsNullOrWhiteSpace($Image)) {
+    return $false
+  }
+
+  if ($Image -match '@sha256:[0-9a-fA-F]{64}$') {
+    return $false
+  }
+
+  if (-not $Image.Contains('/')) {
+    return $false
+  }
+
+  $lastSlash = $Image.LastIndexOf('/')
+  $tagDelimiter = $Image.LastIndexOf(':')
+  if ($tagDelimiter -le $lastSlash) {
+    return $true
+  }
+
+  $tag = $Image.Substring($tagDelimiter + 1)
+  return [string]::Equals($tag, 'latest', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ContainerImageRepoDigest {
+  param([Parameter(Mandatory)][string]$Image)
+
+  $inspect = Invoke-DockerCliCapture -Arguments @('image', 'inspect', $Image, '--format', '{{json .RepoDigests}}')
+  if ($inspect.exitCode -ne 0) {
+    return ''
+  }
+
+  $stdout = ($inspect.stdout ?? '').Trim()
+  if ([string]::IsNullOrWhiteSpace($stdout)) {
+    return ''
+  }
+
+  try {
+    $repoDigests = $stdout | ConvertFrom-Json -Depth 5
+  } catch {
+    return ''
+  }
+
+  $imageName = $Image
+  if ($imageName -match '@') {
+    $imageName = ($imageName -split '@', 2)[0]
+  }
+
+  $lastSlash = $imageName.LastIndexOf('/')
+  $tagDelimiter = $imageName.LastIndexOf(':')
+  if ($tagDelimiter -gt $lastSlash) {
+    $imageName = $imageName.Substring(0, $tagDelimiter)
+  }
+
+  foreach ($candidate in @($repoDigests)) {
+    $candidateText = [string]$candidate
+    if ($candidateText.StartsWith($imageName + '@', [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $candidateText
+    }
+  }
+
+  $firstCandidate = @($repoDigests | Select-Object -First 1)
+  if ($firstCandidate.Count -gt 0) {
+    return [string]$firstCandidate[0]
+  }
+
+  return ''
+}
+
+function Resolve-ToolsImageVerificationEvidence {
+  param([Parameter(Mandatory)][string]$Image)
+
+  if ($Image -match '^(?<digestRef>.+@sha256:[0-9a-fA-F]{64})$') {
+    return [ordered]@{
+      strategy = 'digest-pinned'
+      pulled = $false
+      repoDigest = [string]$matches['digestRef']
+      evidenceRef = [string]$matches['digestRef']
+    }
+  }
+
+  if (Test-IsMutableToolsImageReference -Image $Image) {
+    $pull = Invoke-DockerCliCapture -Arguments @('pull', $Image)
+    if ($pull.exitCode -ne 0) {
+      $message = ((($pull.stdout ?? '') + "`n" + ($pull.stderr ?? '')).Trim())
+      throw ("docker pull failed for '{0}' while verifying mutable tools image tags. Output: {1}" -f $Image, $message)
+    }
+
+    $repoDigest = Get-ContainerImageRepoDigest -Image $Image
+    return [ordered]@{
+      strategy = 'pull-and-inspect'
+      pulled = $true
+      repoDigest = $repoDigest
+      evidenceRef = if ([string]::IsNullOrWhiteSpace($repoDigest)) { $Image } else { $repoDigest }
+    }
+  }
+
+  $repoDigest = Get-ContainerImageRepoDigest -Image $Image
+  return [ordered]@{
+    strategy = 'local-inspect'
+    pulled = $false
+    repoDigest = $repoDigest
+    evidenceRef = if ([string]::IsNullOrWhiteSpace($repoDigest)) { $Image } else { $repoDigest }
+  }
+}
+
+function Invoke-ContainerCapture {
+  param(
+    [Parameter(Mandatory)][string]$Image,
+    [Parameter(Mandatory)][string[]]$Arguments,
+    [string[]]$DockerRunArguments = @()
+  )
+
+  return Invoke-DockerCliCapture -Arguments (@('run') + $commonArgs + @($DockerRunArguments) + @($Image) + @($Arguments))
+}
+
+function Get-ContainerActionlintVersion {
+  param(
+    [Parameter(Mandatory)][string]$Image,
+    [Parameter(Mandatory)][string[]]$Arguments
+  )
+
+  $probe = Invoke-ContainerCapture -Image $Image -Arguments $Arguments
+  if ($probe.exitCode -ne 0) {
+    return ''
+  }
+
+  $combinedOutput = (($probe.stdout ?? '') + "`n" + ($probe.stderr ?? ''))
+  $match = [regex]::Match($combinedOutput, '(?m)^(?<version>\d+\.\d+\.\d+)\s*$')
+  if (-not $match.Success) {
+    return ''
+  }
+
+  return [string]$match.Groups['version'].Value
+}
+
+function Resolve-ActionlintContainerInvocation {
+  param(
+    [Parameter(Mandatory)][string]$RepoRoot,
+    [switch]$UseToolsImage,
+    [AllowEmptyString()][string]$ToolsImageTag
+  )
+
+  $requiredVersion = Get-ActionlintVersionFloor -RepoRoot $RepoRoot
+  $officialImage = "rhysd/actionlint:$requiredVersion"
+  if (-not $UseToolsImage -or [string]::IsNullOrWhiteSpace($ToolsImageTag)) {
+    return [ordered]@{
+      image = $officialImage
+      arguments = @('-color')
+      label = 'actionlint'
+      surface = 'container-official'
+      source = 'official-image'
+      requiredVersion = $requiredVersion
+      detectedVersion = $requiredVersion
+      verificationStrategy = 'official-pinned-tag'
+      verificationEvidenceRef = $officialImage
+      verifiedRepoDigest = ''
+      pulledFresh = $false
+      fallbackReason = ''
+    }
+  }
+
+  $toolsImageVerification = Resolve-ToolsImageVerificationEvidence -Image $ToolsImageTag
+  $detectedToolsVersion = Get-ContainerActionlintVersion -Image $ToolsImageTag -Arguments @('actionlint', '-version')
+  if (-not (Test-ActionlintVersionAtLeast -Version $detectedToolsVersion -MinimumVersion $requiredVersion)) {
+    Write-Host ("[docker] Tools image actionlint version '{0}' is below required '{1}'; using official fallback image '{2}'. Evidence: {3}" -f $(if ([string]::IsNullOrWhiteSpace($detectedToolsVersion)) { '(unknown)' } else { $detectedToolsVersion }), $requiredVersion, $officialImage, $toolsImageVerification.evidenceRef) -ForegroundColor Yellow
+    return [ordered]@{
+      image = $officialImage
+      arguments = @('-color')
+      label = 'actionlint (fallback)'
+      surface = 'container-official-fallback'
+      source = 'official-image-fallback'
+      requiredVersion = $requiredVersion
+      detectedVersion = $detectedToolsVersion
+      verificationStrategy = [string]$toolsImageVerification.strategy
+      verificationEvidenceRef = [string]$toolsImageVerification.evidenceRef
+      verifiedRepoDigest = [string]$toolsImageVerification.repoDigest
+      pulledFresh = [bool]$toolsImageVerification.pulled
+      fallbackReason = 'tools-image-stale'
+    }
+  }
+
+  return [ordered]@{
+    image = $ToolsImageTag
+    arguments = @('actionlint', '-color')
+    label = 'actionlint (tools)'
+    surface = 'container-tools-image'
+    source = 'tools-image'
+    requiredVersion = $requiredVersion
+    detectedVersion = $detectedToolsVersion
+    verificationStrategy = [string]$toolsImageVerification.strategy
+    verificationEvidenceRef = [string]$toolsImageVerification.evidenceRef
+    verifiedRepoDigest = [string]$toolsImageVerification.repoDigest
+    pulledFresh = [bool]$toolsImageVerification.pulled
+    fallbackReason = ''
+  }
+}
+function Invoke-GitReviewLoopCommand {
+  param(
+    [Parameter(Mandatory)][string]$RepoRoot,
+    [Parameter(Mandatory)][string[]]$Arguments
+  )
+
+  $gitPath = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $gitEnvNames = @(
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_COMMON_DIR',
+    'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_PREFIX',
+    'GIT_CEILING_DIRECTORIES'
+  )
+
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $gitPath
+  $psi.WorkingDirectory = $RepoRoot
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  foreach ($arg in @($Arguments)) {
+    [void]$psi.ArgumentList.Add([string]$arg)
+  }
+  foreach ($envName in $gitEnvNames) {
+    [void]$psi.Environment.Remove($envName)
+  }
+
+  $proc = [System.Diagnostics.Process]::new()
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    $global:LASTEXITCODE = [int]$proc.ExitCode
+    return [pscustomobject]@{
+      exitCode = [int]$proc.ExitCode
+      stdout = if ([string]::IsNullOrWhiteSpace($stdout)) { @() } else { @($stdout -split "(`r`n|`n|`r)" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) }
+      stderr = $stderr
+    }
+  } finally {
+    $proc.Dispose()
+  }
+}
+
 function Get-GitReviewLoopMetadata {
   param([string]$RepoRoot)
 
-  $headSha = (& git -C $RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($headSha)) {
+  $headCommand = Invoke-GitReviewLoopCommand -RepoRoot $RepoRoot -Arguments @('rev-parse', 'HEAD')
+  $headSha = @($headCommand.stdout | Select-Object -First 1)
+  $headSha = if ($headSha.Count -gt 0) { [string]$headSha[0] } else { '' }
+  if ($headCommand.exitCode -ne 0 -or [string]::IsNullOrWhiteSpace($headSha)) {
     throw 'Unable to resolve git HEAD for Docker/Desktop review-loop receipt generation.'
   }
 
-  $branchName = (& git -C $RepoRoot branch --show-current 2>$null | Select-Object -First 1)
-  if ($LASTEXITCODE -ne 0) {
+  $branchCommand = Invoke-GitReviewLoopCommand -RepoRoot $RepoRoot -Arguments @('branch', '--show-current')
+  $branchName = @($branchCommand.stdout | Select-Object -First 1)
+  $branchName = if ($branchName.Count -gt 0) { [string]$branchName[0] } else { '' }
+  if ($branchCommand.exitCode -ne 0) {
     $branchName = ''
   }
 
-  $mergeBase = (& git -C $RepoRoot merge-base HEAD upstream/develop 2>$null | Select-Object -First 1)
-  if ($LASTEXITCODE -ne 0) {
+  $mergeBaseCommand = Invoke-GitReviewLoopCommand -RepoRoot $RepoRoot -Arguments @('merge-base', 'HEAD', 'upstream/develop')
+  $mergeBase = @($mergeBaseCommand.stdout | Select-Object -First 1)
+  $mergeBase = if ($mergeBase.Count -gt 0) { [string]$mergeBase[0] } else { '' }
+  if ($mergeBaseCommand.exitCode -ne 0) {
     $mergeBase = ''
   }
 
-  $trackedStatus = (& git -C $RepoRoot status --short --untracked-files=no 2>$null)
-  if ($LASTEXITCODE -ne 0) {
+  $trackedStatusCommand = Invoke-GitReviewLoopCommand -RepoRoot $RepoRoot -Arguments @('status', '--short', '--untracked-files=no')
+  $trackedStatus = @($trackedStatusCommand.stdout)
+  if ($trackedStatusCommand.exitCode -ne 0) {
     $trackedStatus = @()
   }
 
@@ -415,6 +733,7 @@ function Write-DockerParityReviewLoopReceipt {
 
   $reviewSuiteSummaryJsonPath = Join-Path $niResultsRootResolved 'review-suite-summary.json'
   $reviewSuiteSummaryHtmlPath = Join-Path $niResultsRootResolved 'review-suite-summary.html'
+  $hostRamBudgetPath = Join-Path $niResultsRootResolved 'host-ram-budget.json'
   $historyReviewReceiptPath = Join-Path $niResultsRootResolved 'vi-history-review-loop-receipt.json'
   $requirementsSummaryPath = Join-Path $requirementsResultsRootResolved 'verification-summary.json'
   $traceMatrixJsonPath = Join-Path $requirementsResultsRootResolved 'trace-matrix.json'
@@ -430,6 +749,7 @@ function Write-DockerParityReviewLoopReceipt {
     agentVerificationSummaryPath = Get-RepoRelativePath -RepoRoot $RepoRoot -Path $agentVerificationSummaryPath
     reviewSuiteSummaryJsonPath = if (Test-Path -LiteralPath $reviewSuiteSummaryJsonPath -PathType Leaf) { Get-RepoRelativePath -RepoRoot $RepoRoot -Path $reviewSuiteSummaryJsonPath } else { '' }
     reviewSuiteSummaryHtmlPath = if (Test-Path -LiteralPath $reviewSuiteSummaryHtmlPath -PathType Leaf) { Get-RepoRelativePath -RepoRoot $RepoRoot -Path $reviewSuiteSummaryHtmlPath } else { '' }
+    hostRamBudgetPath = if (Test-Path -LiteralPath $hostRamBudgetPath -PathType Leaf) { Get-RepoRelativePath -RepoRoot $RepoRoot -Path $hostRamBudgetPath } else { '' }
     historyReviewReceiptPath = if (Test-Path -LiteralPath $historyReviewReceiptPath -PathType Leaf) { Get-RepoRelativePath -RepoRoot $RepoRoot -Path $historyReviewReceiptPath } else { '' }
     requirementsSummaryPath = if (Test-Path -LiteralPath $requirementsSummaryPath -PathType Leaf) { Get-RepoRelativePath -RepoRoot $RepoRoot -Path $requirementsSummaryPath } else { '' }
     traceMatrixJsonPath = if (Test-Path -LiteralPath $traceMatrixJsonPath -PathType Leaf) { Get-RepoRelativePath -RepoRoot $RepoRoot -Path $traceMatrixJsonPath } else { '' }
@@ -441,6 +761,9 @@ function Write-DockerParityReviewLoopReceipt {
   $recommendedReviewOrder.Add($artifacts.agentVerificationSummaryPath)
   if ($artifacts.reviewSuiteSummaryHtmlPath) {
     $recommendedReviewOrder.Add($artifacts.reviewSuiteSummaryHtmlPath)
+  }
+  if ($artifacts.hostRamBudgetPath) {
+    $recommendedReviewOrder.Add($artifacts.hostRamBudgetPath)
   }
   if ($historyReceipt -and $historyReceipt.ContainsKey('artifacts')) {
     foreach ($artifactKey in @(
@@ -617,6 +940,14 @@ if ($UseToolsImage -and -not $ToolsImageTag) {
   $ToolsImageTag = 'ghcr.io/labview-community-ci-cd/comparevi-tools:latest'
 }
 
+$actionlintInvocation = $null
+if (-not $SkipActionlint) {
+  $actionlintInvocation = Resolve-ActionlintContainerInvocation `
+    -RepoRoot $repoRootResolved `
+    -UseToolsImage:$UseToolsImage `
+    -ToolsImageTag $ToolsImageTag
+}
+
 $requiresDockerSocketPassthrough = $false
 if ($UseToolsImage -and $pesterRequested) {
   $requiresDockerSocketPassthrough = $DockerSocketPassthrough -or (Test-TargetsNILinuxContainerCompareSuite -Paths $PesterPath)
@@ -659,8 +990,14 @@ if ($checkStates.dotnetCliBuild.enabled) {
 
 if ($UseToolsImage -and $ToolsImageTag) {
   if ($checkStates.actionlint.enabled) {
+    $checkStates.actionlint.surface = [string]$actionlintInvocation.surface
+    $checkStates.actionlint.artifacts.image = [string]$actionlintInvocation.image
+    $checkStates.actionlint.artifacts.source = [string]$actionlintInvocation.source
+    $checkStates.actionlint.artifacts.requiredVersion = [string]$actionlintInvocation.requiredVersion
+    $checkStates.actionlint.artifacts.detectedVersion = [string]$actionlintInvocation.detectedVersion
+    $checkStates.actionlint.artifacts.fallbackReason = [string]$actionlintInvocation.fallbackReason
     Invoke-DockerParityStep -StepRecord $checkStates.actionlint -Name 'actionlint' -RunRecord $runRecord -Action {
-      Invoke-Container -Image $ToolsImageTag -Arguments @('actionlint','-color') -Label 'actionlint (tools)'
+      Invoke-Container -Image ([string]$actionlintInvocation.image) -Arguments @($actionlintInvocation.arguments) -Label ([string]$actionlintInvocation.label)
     }
   }
   if ($checkStates.markdownlint.enabled) {
@@ -689,8 +1026,14 @@ if ($UseToolsImage -and $ToolsImageTag) {
   }
 } else {
   if ($checkStates.actionlint.enabled) {
+    $checkStates.actionlint.surface = [string]$actionlintInvocation.surface
+    $checkStates.actionlint.artifacts.image = [string]$actionlintInvocation.image
+    $checkStates.actionlint.artifacts.source = [string]$actionlintInvocation.source
+    $checkStates.actionlint.artifacts.requiredVersion = [string]$actionlintInvocation.requiredVersion
+    $checkStates.actionlint.artifacts.detectedVersion = [string]$actionlintInvocation.detectedVersion
+    $checkStates.actionlint.artifacts.fallbackReason = [string]$actionlintInvocation.fallbackReason
     Invoke-DockerParityStep -StepRecord $checkStates.actionlint -Name 'actionlint' -RunRecord $runRecord -Action {
-      Invoke-Container -Image 'rhysd/actionlint:1.7.8' -Arguments @('-color') -Label 'actionlint'
+      Invoke-Container -Image ([string]$actionlintInvocation.image) -Arguments @($actionlintInvocation.arguments) -Label ([string]$actionlintInvocation.label)
     }
   }
   if ($checkStates.markdownlint.enabled) {
@@ -729,6 +1072,9 @@ if ($checkStates.niLinuxReviewSuite.enabled) {
     $resultsRootResolved = [System.IO.Path]::GetFullPath((Join-Path $repoRootResolved $NILinuxReviewSuiteResultsRoot))
     $reviewSuiteSummaryHtmlPath = Join-Path $resultsRootResolved 'review-suite-summary.html'
     $reviewSuiteSummaryJsonPath = Join-Path $resultsRootResolved 'review-suite-summary.json'
+    $hostRamBudgetPath = Join-Path $resultsRootResolved 'host-ram-budget.json'
+    $flagCombinationCertificationJsonPath = Join-Path $resultsRootResolved 'flag-combination-certification.json'
+    $flagCombinationCertificationHtmlPath = Join-Path $resultsRootResolved 'flag-combination-certification.html'
     $historyMarkdownPath = Join-Path $resultsRootResolved 'vi-history-report/results/history-report.md'
     $historyHtmlPath = Join-Path $resultsRootResolved 'vi-history-report/results/history-report.html'
     $historySummaryPath = Join-Path $resultsRootResolved 'vi-history-report/results/history-summary.json'
@@ -775,6 +1121,9 @@ if ($checkStates.niLinuxReviewSuite.enabled) {
     foreach ($artifactPath in @(
         $reviewSuiteSummaryHtmlPath,
         $reviewSuiteSummaryJsonPath,
+        $hostRamBudgetPath,
+        $flagCombinationCertificationJsonPath,
+        $flagCombinationCertificationHtmlPath,
         $historyMarkdownPath,
         $historyHtmlPath,
         $historySummaryPath,
@@ -789,12 +1138,16 @@ if ($checkStates.niLinuxReviewSuite.enabled) {
     $checkStates.niLinuxReviewSuite.artifacts.resultsRoot = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $resultsRootResolved
     $checkStates.niLinuxReviewSuite.artifacts.reviewSuiteSummaryJsonPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $reviewSuiteSummaryJsonPath
     $checkStates.niLinuxReviewSuite.artifacts.reviewSuiteSummaryHtmlPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $reviewSuiteSummaryHtmlPath
+    $checkStates.niLinuxReviewSuite.artifacts.hostRamBudgetPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $hostRamBudgetPath
+    $checkStates.niLinuxReviewSuite.artifacts.flagCombinationCertificationJsonPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $flagCombinationCertificationJsonPath
+    $checkStates.niLinuxReviewSuite.artifacts.flagCombinationCertificationHtmlPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $flagCombinationCertificationHtmlPath
     $checkStates.niLinuxReviewSuite.artifacts.historyReportHtmlPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $historyHtmlPath
     $checkStates.niLinuxReviewSuite.artifacts.historySummaryPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $historySummaryPath
     $checkStates.niLinuxReviewSuite.artifacts.historyReviewReceiptPath = Get-RepoRelativePath -RepoRoot $repoRootResolved -Path $historyReviewReceiptPath
 
-    Write-Host ("[docker] ni-linux-review-suite OK (summary={0}; history={1}; facade={2})" -f
+    Write-Host ("[docker] ni-linux-review-suite OK (summary={0}; certification={1}; history={2}; facade={3})" -f
         ([System.IO.Path]::GetRelativePath($repoRootResolved, $reviewSuiteSummaryHtmlPath).Replace('\', '/')),
+        ([System.IO.Path]::GetRelativePath($repoRootResolved, $flagCombinationCertificationHtmlPath).Replace('\', '/')),
         ([System.IO.Path]::GetRelativePath($repoRootResolved, $historyHtmlPath).Replace('\', '/')),
         ([System.IO.Path]::GetRelativePath($repoRootResolved, $historySummaryPath).Replace('\', '/'))) -ForegroundColor Green
   }
@@ -925,4 +1278,3 @@ Write-Host 'Non-LabVIEW container checks completed.' -ForegroundColor Green
     -NILinuxResultsRoot $NILinuxReviewSuiteResultsRoot `
     -RequirementsResultsRoot $RequirementsVerificationResultsRoot
 }
-

@@ -39,8 +39,11 @@ Quick reference for building, testing, and releasing the LVCompare composite act
       - `keep_branch`: set to `true` when you want to inspect the synthetic scratch
         PR afterward; keep `false` for normal sweeps so the helper cleans up.
     - Requires `GH_TOKEN`/`GITHUB_TOKEN` with push + workflow scopes. Locally,
-      populate `$env:GH_TOKEN` (for example from `C:\github_token.txt`) before
-      running `tools/Test-PRVIStagingSmoke.ps1`.
+      the repo helpers also honor `GH_TOKEN_FILE`, `GITHUB_TOKEN_FILE`, and the
+      standard host token file fallback (`C:\github_token.txt` on Windows,
+      `/mnt/c/github_token.txt` on non-Windows host planes), so explicit
+      `$env:GH_TOKEN` export is only needed when you want to override that
+      default resolution order.
     - Successful runs upload `tests/results/_agent/smoke/vi-stage/smoke-*.json`
       summaries and assert the scratch PR carries the `vi-staging-ready` label.
     - Scenario catalog (defined in `Get-VIStagingSmokeScenarios`):
@@ -165,13 +168,18 @@ Quick reference for building, testing, and releasing the LVCompare composite act
 - `node tools/priority/github-helper.mjs sanitize --input issue-body.md --output issue-body.gh.txt`  
   Doubles backslashes and normalises line endings so literal sequences (for example `\t`, `\tools`) survive
   `gh issue create/edit`. Omit `--output` to print to STDOUT.
+- `pwsh -NoLogo -NoProfile -File tools/Post-IssueComment.ps1 -Issue <number> -BodyFile issue-comment.md`
+  Posts GitHub issue comments through `--body-file` by default so multiline Markdown survives PowerShell and mixed
+  Windows/WSL shells without backtick-escape drift.
 - `node tools/priority/github-helper.mjs snippet --issue 531 --prefix Fixes`  
   Emits an auto-link snippet (defaults to `Fixes #531`) you can drop into PR descriptions so GitHub auto-closes the issue.
 - `node tools/npm/run-script.mjs priority:project:portfolio:apply -- --url <issue-or-pr-url> --use-config`  
   Adds the issue/PR to project `LabVIEW-Community-CI-CD#2` when missing, applies the tracked single-select portfolio
-  fields, and writes `tests/results/_agent/project/portfolio-apply-report.json`. The report also carries normalized
-  built-in board metadata (`Type`, `Milestone`, `Reviewers`, linked PRs, parent issue, `Sub-issues progress`) so
-  future agents can reason about intake state without a second `gh project item-list` scrape.
+  fields, and writes `tests/results/_agent/project/portfolio-apply-report.json`. Live apply now uses a target-scoped
+  lookup plus one batched single-select mutation instead of a full board scrape followed by per-field writes. The
+  report also carries normalized built-in board metadata (`Type`, `Milestone`, `Reviewers`, linked PRs, parent issue,
+  `Sub-issues progress`) so future agents can reason about intake state without a second `gh project item-list`
+  scrape.
 - `node tools/npm/run-script.mjs priority:artifact:download -- --repo <owner/repo> --run-id <id> --artifact <name>`  
   Downloads named workflow artifacts through the checked-in helper path instead of raw `gh run download`, writing a
   deterministic report at `tests/results/_agent/reviews/run-artifact-download.json` (or `--report <path>`). Use this
@@ -204,7 +212,9 @@ Quick reference for building, testing, and releasing the LVCompare composite act
 node tools/npm/run-script.mjs build
 node tools/npm/run-script.mjs generate:outputs
 node tools/npm/run-script.mjs lint            # markdownlint + custom checks
-./tools/PrePush-Checks.ps1  # actionlint, optional YAML round-trip
+node tools/npm/run-script.mjs priority:security:audit        # dependency-audit receipt (observe mode)
+node tools/npm/run-script.mjs priority:security:audit:gate   # explicit blocking dependency-audit gate
+./tools/PrePush-Checks.ps1  # actionlint, dependency-audit observation, optional YAML round-trip
 ```
 
 For Docker/Desktop VI history validation, run fast-loop lanes explicitly:
@@ -389,6 +399,11 @@ For Docker/Desktop VI history validation, run fast-loop lanes explicitly:
   `comparevi-history-bundle-certification` follows the same routing.
   `vi-history-scenarios-*` runs for `compare-engine-history`, `docker-vi-history`, `mixed-runtime`, `unclassified`, and
   explicit manual dispatches; the final VI-history plan still honors `history_scenario_set`.
+- Hosted Windows mirror proof now lives in `Validate` as the non-required `vi-history-scenarios-windows` lane.
+  That lane runs on GitHub-hosted `windows-2022`, hydrates
+  `nationalinstruments/labview:2026q1-windows` with no repository runner dependency, and is expected to
+  take materially longer to pull than the Linux lane.
+  Agents can dispatch the hosted lane while continuing with the manual Linux or Windows Docker Desktop/WSL2 lanes locally.
 - Machine-readable routing evidence is written to
   `tests/results/_agent/validate-scope-plan/validate-scope-plan.json` and summarized in the Validate step summary so
   reviewers can see why heavy lanes were bypassed.
@@ -499,6 +514,10 @@ For Docker/Desktop VI history validation, run fast-loop lanes explicitly:
   `gh issue create` / `node tools/npm/run-script.mjs priority:pr`. For PR scenarios, the helper can hydrate
   issue title/URL and standing-priority state from the existing issue snapshot
   under `tests/results/_agent/issue/`.
+- For issue comments with multiline Markdown, use
+  `pwsh -File tools/Post-IssueComment.ps1 -Issue <number> -BodyFile issue-comment.md`
+  (or `-Body <text>` when the caller already has the rendered markdown in memory) instead of inline
+  `gh issue comment --body "..."`.
 - For a machine-readable execution planner and explicit apply helper, use
   `pwsh -File tools/Invoke-GitHubIntakeScenario.ps1 -Scenario <name> -AsJson`.
   This stays in dry-run mode by default, emits the structured execution plan,

@@ -11,11 +11,22 @@ import {
   buildMergeSummaryPayload,
   buildPolicyTrace,
   classifyPromotionState,
+  deleteHeadBranchRef,
+  deleteMergedHeadBranch,
   evaluatePromotionReviewClearance,
+  hasDeferredPostMergeBranchCleanup,
+  isQueueManagedBaseBranch,
+  loadMergeSyncCopilotReviewStrategy,
+  normalizeRepositoryMergeCapabilities,
+  normalizeCopilotReviewStrategy,
+  reconcileDeferredBranchCleanup,
+  readRepositoryMergeCapabilities,
+  resolveBranchCleanupPlan,
   resolveReadyValidationClearancePath,
   isUpstreamOwnedHead,
   normalizeBaseRefName,
   runMergeSync,
+  selectMergeMethod,
   selectMergeMode,
   shouldRetryWithAuto,
   getMergeQueueBranches
@@ -24,6 +35,23 @@ import { classifyBranch, loadBranchClassContract } from '../lib/branch-classific
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const branchClassContract = loadBranchClassContract(repoRoot);
+const DEFAULT_REPOSITORY_MERGE_CAPABILITIES = normalizeRepositoryMergeCapabilities({
+  allow_merge_commit: false,
+  allow_squash_merge: true,
+  allow_rebase_merge: true
+});
+
+function buildRepositoryMergeCapabilities(overrides = {}) {
+  return {
+    ...DEFAULT_REPOSITORY_MERGE_CAPABILITIES,
+    ...overrides,
+    supportedMethods: Array.isArray(overrides.supportedMethods)
+      ? [...overrides.supportedMethods]
+      : Array.isArray(DEFAULT_REPOSITORY_MERGE_CAPABILITIES.supportedMethods)
+        ? [...DEFAULT_REPOSITORY_MERGE_CAPABILITIES.supportedMethods]
+        : []
+  };
+}
 
 test('selectMergeMode chooses auto for policy-blocked merge states', () => {
   const selection = selectMergeMode({
@@ -236,6 +264,93 @@ test('buildMergeArgs keeps --delete-branch for direct merges when branch cleanup
   ]);
 });
 
+test('isQueueManagedBaseBranch honors branch-class merge policy and normalized base refs', () => {
+  const baseBranchClass = classifyBranch({
+    branch: 'develop',
+    contract: branchClassContract,
+    repositoryRole: 'upstream'
+  });
+
+  assert.equal(
+    isQueueManagedBaseBranch({
+      baseRefName: 'refs/heads/develop',
+      mergeQueueBranches: new Set(),
+      baseBranchClass
+    }),
+    true
+  );
+  assert.equal(
+    isQueueManagedBaseBranch({
+      baseRefName: 'refs/heads/main',
+      mergeQueueBranches: new Set(['main'])
+    }),
+    true
+  );
+});
+
+test('resolveBranchCleanupPlan switches queue-managed admin merges to post-merge cleanup', () => {
+  const baseBranchClass = classifyBranch({
+    branch: 'develop',
+    contract: branchClassContract,
+    repositoryRole: 'upstream'
+  });
+
+  assert.deepEqual(
+    resolveBranchCleanupPlan({
+      keepBranch: false,
+      mode: 'admin',
+      baseRefName: 'develop',
+      mergeQueueBranches: new Set(),
+      baseBranchClass
+    }),
+    {
+      requested: true,
+      inlineDeleteBranch: false,
+      postMergeDelete: true,
+      reason: 'post-merge-api-delete'
+    }
+  );
+});
+
+test('resolveBranchCleanupPlan uses post-merge cleanup for auto mode', () => {
+  assert.deepEqual(
+    resolveBranchCleanupPlan({
+      keepBranch: false,
+      mode: 'auto',
+      baseRefName: 'develop',
+      mergeQueueBranches: new Set(['develop'])
+    }),
+    {
+      requested: true,
+      inlineDeleteBranch: false,
+      postMergeDelete: true,
+      reason: 'post-merge-api-delete'
+    }
+  );
+});
+
+test('buildMergeArgs omits --delete-branch when inline cleanup is disabled for admin merges', () => {
+  assert.deepEqual(
+    buildMergeArgs({
+      pr: 1018,
+      repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+      method: 'squash',
+      mode: 'admin',
+      keepBranch: false,
+      inlineDeleteBranch: false
+    }),
+    [
+      'pr',
+      'merge',
+      '1018',
+      '--repo',
+      'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+      '--squash',
+      '--admin'
+    ]
+  );
+});
+
 test('selectMergeMode keeps queue reason stable for refs/heads base branch values', () => {
   const selection = selectMergeMode(
     {
@@ -390,6 +505,176 @@ test('buildMergeArgs omits --delete-branch for auto merges so merge-queue branch
     '--squash',
     '--auto'
   ]);
+});
+
+test('deleteMergedHeadBranch treats an already-absent branch as a successful cleanup outcome', () => {
+  const cleanup = deleteMergedHeadBranch({
+    repoRoot,
+    prInfo: {
+      headRefName: 'issue/origin-1397-test-branch',
+      headRepository: { name: 'compare-vi-cli-action-fork' },
+      headRepositoryOwner: { login: 'LabVIEW-Community-CI-CD' }
+    },
+    spawnSyncFn: () => ({
+      status: 1,
+      stdout: '',
+      stderr: 'gh: Not Found (HTTP 404)\n'
+    })
+  });
+
+  assert.equal(cleanup.status, 'already-absent');
+  assert.equal(cleanup.repository, 'labview-community-ci-cd/compare-vi-cli-action-fork');
+  assert.equal(cleanup.headRefName, 'issue/origin-1397-test-branch');
+});
+
+test('deleteHeadBranchRef emits queue-safe dry-run cleanup output', () => {
+  const cleanup = deleteHeadBranchRef({
+    repoRoot,
+    headRepositorySlug: 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork',
+    headRefName: 'issue/origin-1430-test-branch',
+    dryRun: true
+  });
+
+  assert.equal(cleanup.status, 'dry-run');
+  assert.equal(cleanup.repository, 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork');
+  assert.equal(cleanup.headRefName, 'issue/origin-1430-test-branch');
+});
+
+test('hasDeferredPostMergeBranchCleanup detects queued auto-merge cleanup receipts', () => {
+  assert.equal(hasDeferredPostMergeBranchCleanup({
+    branchCleanup: {
+      requested: true,
+      status: 'deferred',
+      postMergeDelete: true
+    }
+  }), true);
+
+  assert.equal(hasDeferredPostMergeBranchCleanup({
+    branchCleanup: {
+      requested: true,
+      status: 'inline-requested',
+      postMergeDelete: false
+    }
+  }), false);
+
+  assert.equal(hasDeferredPostMergeBranchCleanup({
+    finalMode: 'auto',
+    branchCleanup: {
+      requested: true,
+      status: 'deferred',
+      postMergeDelete: false,
+      inlineDeleteBranch: false
+    }
+  }), true);
+});
+
+test('reconcileDeferredBranchCleanup completes deferred cleanup once queued promotion materializes', async () => {
+  const cleanupCalls = [];
+  const result = await reconcileDeferredBranchCleanup({
+    repoRoot,
+    summary: {
+      repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+      pr: 1430,
+      finalMode: 'auto',
+      promotion: {
+        initial: {
+          state: 'OPEN',
+          mergeStateStatus: 'BLOCKED',
+          isInMergeQueue: false,
+          autoMergeEnabled: false,
+          mergedAt: null
+        },
+        final: {
+          state: 'OPEN',
+          mergeStateStatus: 'BLOCKED',
+          isInMergeQueue: true,
+          autoMergeEnabled: true,
+          mergedAt: null
+        },
+        status: 'queued',
+        materialized: true
+      },
+      branchCleanup: {
+        requested: true,
+        attempted: false,
+        status: 'deferred',
+        reason: 'promotion-not-yet-merged',
+        postMergeDelete: true,
+        repository: 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork',
+        headRefName: 'issue/origin-1430-queue-auto-branch-cleanup'
+      }
+    },
+    readPromotionStateFn: () => ({
+      state: 'MERGED',
+      mergeStateStatus: 'CLEAN',
+      isInMergeQueue: false,
+      autoMergeRequest: null,
+      mergedAt: '2026-03-20T02:15:00Z'
+    }),
+    deleteHeadBranchRefFn: ({ headRepositorySlug, headRefName, dryRun }) => {
+      cleanupCalls.push({ headRepositorySlug, headRefName, dryRun });
+      return {
+        requested: true,
+        attempted: true,
+        status: 'deleted',
+        reason: 'post-merge-api-delete',
+        repository: headRepositorySlug,
+        headRefName
+      };
+    },
+    observedAt: '2026-03-20T02:16:00Z'
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.status, 'completed');
+  assert.equal(result.promotion.status, 'merged');
+  assert.equal(result.summary.branchCleanup.status, 'deleted');
+  assert.equal(result.summary.reconciledAt, '2026-03-20T02:16:00Z');
+  assert.deepEqual(cleanupCalls, [{
+    headRepositorySlug: 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork',
+    headRefName: 'issue/origin-1430-queue-auto-branch-cleanup',
+    dryRun: false
+  }]);
+});
+
+test('reconcileDeferredBranchCleanup leaves queued auto-merge cleanup deferred until merged', async () => {
+  const result = await reconcileDeferredBranchCleanup({
+    repoRoot,
+    summary: {
+      repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+      pr: 1430,
+      finalMode: 'auto',
+      promotion: {
+        initial: {
+          state: 'OPEN',
+          mergeStateStatus: 'BLOCKED',
+          isInMergeQueue: false,
+          autoMergeEnabled: false,
+          mergedAt: null
+        }
+      },
+      branchCleanup: {
+        requested: true,
+        attempted: false,
+        status: 'deferred',
+        reason: 'promotion-not-yet-merged',
+        postMergeDelete: true,
+        repository: 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork',
+        headRefName: 'issue/origin-1430-queue-auto-branch-cleanup'
+      }
+    },
+    readPromotionStateFn: () => ({
+      state: 'OPEN',
+      mergeStateStatus: 'BLOCKED',
+      isInMergeQueue: true,
+      autoMergeRequest: { enabledAt: '2026-03-20T02:14:00Z' },
+      mergedAt: null
+    })
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.status, 'deferred');
+  assert.equal(result.promotion.status, 'queued');
 });
 
 test('getMergeQueueBranches returns exact queue-managed branches from policy rulesets', () => {
@@ -566,6 +851,97 @@ test('normalizeBaseRefName handles refs prefix and casing', () => {
   assert.equal(normalizeBaseRefName(undefined), '');
 });
 
+test('normalizeRepositoryMergeCapabilities maps GitHub repo fields into supported merge methods', () => {
+  const capabilities = normalizeRepositoryMergeCapabilities({
+    allow_merge_commit: false,
+    allow_squash_merge: true,
+    allow_rebase_merge: true
+  });
+
+  assert.deepEqual(capabilities, {
+    allowMergeCommit: false,
+    allowSquashMerge: true,
+    allowRebaseMerge: true,
+    supportedMethods: ['squash', 'rebase']
+  });
+});
+
+test('selectMergeMethod keeps the preferred default when the repository supports squash', () => {
+  const selection = selectMergeMethod({
+    repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    requestedMethod: 'squash',
+    requestedSource: 'default',
+    capabilities: buildRepositoryMergeCapabilities({
+      supportedMethods: ['squash', 'rebase']
+    })
+  });
+
+  assert.deepEqual(selection, {
+    requestedMethod: 'squash',
+    requestedSource: 'default',
+    effectiveMethod: 'squash',
+    reason: 'default-preferred-supported',
+    capabilities: buildRepositoryMergeCapabilities({
+      supportedMethods: ['squash', 'rebase']
+    })
+  });
+});
+
+test('selectMergeMethod falls back to a supported method when the default is disabled by repo policy', () => {
+  const selection = selectMergeMethod({
+    repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    requestedMethod: 'squash',
+    requestedSource: 'default',
+    capabilities: buildRepositoryMergeCapabilities({
+      allowSquashMerge: false,
+      supportedMethods: ['rebase']
+    })
+  });
+
+  assert.equal(selection.effectiveMethod, 'rebase');
+  assert.equal(selection.reason, 'default-fallback-rebase');
+});
+
+test('selectMergeMethod fails closed when an explicit unsupported method is requested', () => {
+  assert.throws(
+    () =>
+      selectMergeMethod({
+        repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+        requestedMethod: 'merge',
+        requestedSource: 'cli',
+        capabilities: buildRepositoryMergeCapabilities({
+          allowMergeCommit: false,
+          supportedMethods: ['squash', 'rebase']
+        })
+      }),
+    /does not allow requested merge method 'merge'/i
+  );
+});
+
+test('readRepositoryMergeCapabilities uses the repo REST endpoint and normalizes support flags', () => {
+  let observedArgs = null;
+  const capabilities = readRepositoryMergeCapabilities({
+    repoRoot: '/tmp/repo',
+    repo: 'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    runGhJsonFn: (_repoRoot, args) => {
+      observedArgs = args;
+      return {
+        allow_merge_commit: false,
+        allow_squash_merge: true,
+        allow_rebase_merge: false
+      };
+    }
+  });
+
+  assert.deepEqual(observedArgs, ['api', 'repos/LabVIEW-Community-CI-CD/compare-vi-cli-action']);
+  assert.deepEqual(capabilities, {
+    allowMergeCommit: false,
+    allowSquashMerge: true,
+    allowRebaseMerge: false,
+    supportedMethods: ['squash']
+  });
+});
+
 test('buildMergeSummaryPayload captures admin override selection details', () => {
   const payload = buildMergeSummaryPayload({
     repo: 'owner/repo',
@@ -664,6 +1040,28 @@ test('buildMergeSummaryPayload preserves selected/final reason fields for diagno
   assert.equal(payload.finalReason, 'direct-merge-policy-block-retry-auto');
 });
 
+test('normalizeCopilotReviewStrategy defaults and accepts the local-only strategy', () => {
+  assert.equal(normalizeCopilotReviewStrategy(null), 'github-review-required');
+  assert.equal(normalizeCopilotReviewStrategy('draft-only-explicit'), 'draft-only-explicit');
+  assert.throws(() => normalizeCopilotReviewStrategy('disabled'), /Unsupported copilotReviewStrategy/);
+});
+
+test('loadMergeSyncCopilotReviewStrategy reads delivery-agent policy and falls back when absent', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'merge-sync-pr-policy-'));
+  await mkdir(path.join(tempDir, 'tools', 'priority'), { recursive: true });
+  await writeFile(
+    path.join(tempDir, 'tools', 'priority', 'delivery-agent.policy.json'),
+    `${JSON.stringify({ copilotReviewStrategy: 'draft-only-explicit' })}\n`,
+    'utf8'
+  );
+
+  assert.equal(await loadMergeSyncCopilotReviewStrategy({ repoRoot: tempDir }), 'draft-only-explicit');
+  assert.equal(
+    await loadMergeSyncCopilotReviewStrategy({ repoRoot: path.join(tempDir, 'missing-policy-root') }),
+    'github-review-required'
+  );
+});
+
 test('classifyPromotionState reports queued and already-queued distinctly', () => {
   assert.deepEqual(
     classifyPromotionState(
@@ -750,6 +1148,7 @@ test('runMergeSync records queued promotion state after auto merge activation ma
     ],
     repoRoot,
     ensureGhCliFn: () => {},
+    readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
     readPrInfoFn: () => ({
       number: 123,
       state: 'OPEN',
@@ -785,6 +1184,273 @@ test('runMergeSync records queued promotion state after auto merge activation ma
   assert.equal(written.promotion.status, 'queued');
 });
 
+test('runMergeSync falls back to a supported repository merge method before invoking gh pr merge', async () => {
+  const mergeArgs = [];
+  let promotionReads = 0;
+
+  const payload = await runMergeSync({
+    argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '555', '--repo', 'owner/repo'],
+    repoRoot,
+    ensureGhCliFn: () => {},
+    readRepositoryMergeCapabilitiesFn: () =>
+      buildRepositoryMergeCapabilities({
+        allowSquashMerge: false,
+        allowRebaseMerge: true,
+        supportedMethods: ['rebase']
+      }),
+    readPrInfoFn: () => ({
+      number: 555,
+      state: 'OPEN',
+      isDraft: false,
+      mergeStateStatus: 'CLEAN',
+      mergeable: 'MERGEABLE',
+      baseRefName: 'sync-test',
+      headRefOid: '1234567890123456789012345678901234567890',
+      url: 'https://example.test/pr/555'
+    }),
+    evaluatePromotionReviewClearanceFn: async () => ({
+      ok: true,
+      report: {
+        status: 'pass',
+        gateState: 'ready',
+        reasons: ['current-head-review-run-completed-clean']
+      }
+    }),
+    readPromotionStateFn: () => {
+      promotionReads += 1;
+      return promotionReads === 1
+        ? {
+            state: 'OPEN',
+            mergeStateStatus: 'CLEAN',
+            isInMergeQueue: false,
+            autoMergeRequest: null,
+            mergedAt: null
+          }
+        : {
+            state: 'MERGED',
+            mergeStateStatus: 'CLEAN',
+            isInMergeQueue: false,
+            autoMergeRequest: null,
+            mergedAt: '2026-03-20T03:14:00Z'
+          };
+    },
+    runMergeAttemptFn: ({ args }) => {
+      mergeArgs.push(args);
+      return { status: 0, stdout: 'merged', stderr: '' };
+    },
+    sleepFn: async () => {}
+  });
+
+  assert.deepEqual(mergeArgs, [[
+    'pr',
+    'merge',
+    '555',
+    '--repo',
+    'owner/repo',
+    '--rebase',
+    '--delete-branch'
+  ]]);
+  assert.equal(payload.mergeMethod, 'rebase');
+  assert.equal(payload.mergeMethodSelection.requestedMethod, 'squash');
+  assert.equal(payload.mergeMethodSelection.effectiveMethod, 'rebase');
+  assert.equal(payload.mergeMethodSelection.reason, 'default-fallback-rebase');
+});
+
+test('runMergeSync fails before merge when an explicit unsupported method is requested', async () => {
+  let mergeAttempted = false;
+
+  await assert.rejects(
+    () =>
+      runMergeSync({
+        argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '556', '--repo', 'owner/repo', '--method', 'merge'],
+        repoRoot,
+        ensureGhCliFn: () => {},
+        readRepositoryMergeCapabilitiesFn: () =>
+          buildRepositoryMergeCapabilities({
+            allowMergeCommit: false,
+            allowSquashMerge: true,
+            allowRebaseMerge: false,
+            supportedMethods: ['squash']
+          }),
+        runMergeAttemptFn: () => {
+          mergeAttempted = true;
+          return { status: 0, stdout: '', stderr: '' };
+        }
+      }),
+    /does not allow requested merge method 'merge'/i
+  );
+
+  assert.equal(mergeAttempted, false);
+});
+
+test('runMergeSync creates the parent directory for explicit summary paths', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'merge-sync-pr-summary-dir-'));
+  const nestedSummaryPath = path.join(tempDir, 'tests', 'results', '_agent', 'queue', 'merge-sync-1433.json');
+
+  await runMergeSync({
+    argv: [
+      'node',
+      'tools/priority/merge-sync-pr.mjs',
+      '--pr',
+      '1433',
+      '--repo',
+      'owner/repo',
+      '--summary-path',
+      nestedSummaryPath
+    ],
+    repoRoot,
+    ensureGhCliFn: () => {},
+    readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
+    readPrInfoFn: () => ({
+      number: 1433,
+      state: 'OPEN',
+      isDraft: false,
+      mergeStateStatus: 'BLOCKED',
+      mergeable: 'MERGEABLE',
+      baseRefName: 'develop',
+      headRefOid: '1234567890123456789012345678901234567890',
+      url: 'https://example.test/pr/1433'
+    }),
+    evaluatePromotionReviewClearanceFn: async () => ({
+      ok: true,
+      report: {
+        status: 'pass',
+        gateState: 'ready',
+        reasons: ['current-head-review-run-completed-clean']
+      }
+    }),
+    readPromotionStateFn: (() => {
+      let reads = 0;
+      return () => {
+        reads += 1;
+        return reads === 1
+          ? {
+              state: 'OPEN',
+              mergeStateStatus: 'BLOCKED',
+              isInMergeQueue: false,
+              autoMergeRequest: null,
+              mergedAt: null
+            }
+          : {
+              state: 'OPEN',
+              mergeStateStatus: 'BLOCKED',
+              isInMergeQueue: true,
+              autoMergeRequest: null,
+              mergedAt: null
+            };
+      };
+    })(),
+    runMergeAttemptFn: () => ({ status: 0, stdout: 'queued', stderr: '' }),
+    sleepFn: async () => {}
+  });
+
+  const written = JSON.parse(await readFile(nestedSummaryPath, 'utf8'));
+  assert.equal(written.pr, 1433);
+  assert.equal(written.promotion.status, 'queued');
+});
+
+test('runMergeSync omits inline delete and performs post-merge cleanup for admin merges on queue-managed bases', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'merge-sync-pr-admin-cleanup-'));
+  const mergeArgs = [];
+  const cleanupCalls = [];
+  let promotionReads = 0;
+
+  const payload = await runMergeSync({
+    argv: [
+      'node',
+      'tools/priority/merge-sync-pr.mjs',
+      '--pr',
+      '128',
+      '--repo',
+      'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+      '--admin',
+      '--summary-path',
+      path.join(tempDir, 'summary.json')
+    ],
+    repoRoot,
+    ensureGhCliFn: () => {},
+    readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
+    readPrInfoFn: () => ({
+      number: 128,
+      state: 'OPEN',
+      isDraft: false,
+      mergeStateStatus: 'BLOCKED',
+      mergeable: 'MERGEABLE',
+      baseRefName: 'develop',
+      headRefName: 'issue/origin-1397-merge-queue-delete-branch',
+      headRepository: {
+        name: 'compare-vi-cli-action-fork'
+      },
+      headRepositoryOwner: {
+        login: 'LabVIEW-Community-CI-CD'
+      },
+      headRefOid: '1234567890123456789012345678901234567890',
+      url: 'https://example.test/pr/128'
+    }),
+    evaluatePromotionReviewClearanceFn: async () => ({
+      ok: true,
+      report: {
+        status: 'pass',
+        gateState: 'ready',
+        reasons: ['current-head-review-run-completed-clean']
+      }
+    }),
+    readPromotionStateFn: () => {
+      promotionReads += 1;
+      return promotionReads === 1
+        ? {
+            state: 'OPEN',
+            mergeStateStatus: 'BLOCKED',
+            isInMergeQueue: false,
+            autoMergeRequest: null,
+            mergedAt: null
+          }
+        : {
+            state: 'MERGED',
+            mergeStateStatus: 'CLEAN',
+            isInMergeQueue: false,
+            autoMergeRequest: null,
+            mergedAt: '2026-03-20T01:26:17Z'
+          };
+    },
+    runMergeAttemptFn: ({ args }) => {
+      mergeArgs.push(args);
+      return { status: 0, stdout: 'merged', stderr: '' };
+    },
+    deleteMergedHeadBranchFn: ({ prInfo, dryRun }) => {
+      cleanupCalls.push({ headRefName: prInfo.headRefName, dryRun });
+      return {
+        requested: true,
+        attempted: true,
+        status: 'already-absent',
+        reason: 'post-merge-api-delete',
+        repository: 'labview-community-ci-cd/compare-vi-cli-action-fork',
+        headRefName: prInfo.headRefName
+      };
+    },
+    sleepFn: async () => {}
+  });
+
+  assert.deepEqual(mergeArgs, [[
+    'pr',
+    'merge',
+    '128',
+    '--repo',
+    'LabVIEW-Community-CI-CD/compare-vi-cli-action',
+    '--squash',
+    '--admin'
+  ]]);
+  assert.deepEqual(cleanupCalls, [{
+    headRefName: 'issue/origin-1397-merge-queue-delete-branch',
+    dryRun: false
+  }]);
+  assert.equal(payload.promotion.status, 'merged');
+  assert.equal(payload.branchCleanup.status, 'already-absent');
+
+  const written = JSON.parse(await readFile(path.join(tempDir, 'summary.json'), 'utf8'));
+  assert.equal(written.branchCleanup.status, 'already-absent');
+});
+
 test('runMergeSync fails when auto merge command succeeds but no durable promotion state appears', async () => {
   await assert.rejects(
     () =>
@@ -792,6 +1458,7 @@ test('runMergeSync fails when auto merge command succeeds but no durable promoti
         argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '124', '--repo', 'owner/repo'],
         repoRoot,
         ensureGhCliFn: () => {},
+        readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
         readPrInfoFn: () => ({
           number: 124,
           state: 'OPEN',
@@ -824,7 +1491,54 @@ test('runMergeSync fails when auto merge command succeeds but no durable promoti
   );
 });
 
+test('runMergeSync forwards the effective copilot review strategy into merge admission', async () => {
+  let observedStrategy = null;
+
+  await assert.rejects(
+    () =>
+      runMergeSync({
+        argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '124', '--repo', 'owner/repo'],
+        repoRoot,
+        ensureGhCliFn: () => {},
+        readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
+        loadMergeSyncCopilotReviewStrategyFn: async () => 'draft-only-explicit',
+        readPromotionStateFn: () => ({
+          state: 'OPEN',
+          mergeStateStatus: 'BLOCKED',
+          isInMergeQueue: false,
+          autoMergeRequest: null,
+          mergedAt: null
+        }),
+        readPrInfoFn: () => ({
+          number: 124,
+          state: 'OPEN',
+          isDraft: false,
+          mergeStateStatus: 'BLOCKED',
+          mergeable: 'MERGEABLE',
+          baseRefName: 'develop',
+          headRefOid: '1234567890123456789012345678901234567890',
+          url: 'https://example.test/pr/124'
+        }),
+        evaluatePromotionReviewClearanceFn: async ({ copilotReviewStrategy }) => {
+          observedStrategy = copilotReviewStrategy;
+          return {
+            ok: false,
+            report: {
+              status: 'fail',
+              gateState: 'blocked',
+              reasons: ['copilot-review-run-unobserved']
+            }
+          };
+        }
+      }),
+    /copilot-review-run-unobserved/
+  );
+
+  assert.equal(observedStrategy, 'draft-only-explicit');
+});
+
 test('evaluatePromotionReviewClearance summarizes a passing current-head no-comment review run', async () => {
+  let receivedArgs = null;
   const result = await evaluatePromotionReviewClearance({
     repo: 'owner/repo',
     pr: 125,
@@ -833,25 +1547,31 @@ test('evaluatePromotionReviewClearance summarizes a passing current-head no-comm
       baseRefName: 'develop',
       headRefOid: '1234567890123456789012345678901234567890'
     },
-    runCopilotReviewGateFn: async () => ({
-      exitCode: 0,
-      report: {
-        status: 'pass',
-        gateState: 'ready',
-        reasons: ['current-head-review-run-completed-clean'],
-        summary: {
-          actionableCommentCount: 0,
-          actionableThreadCount: 0
-        },
-        signals: {
-          hasCurrentHeadReview: false,
-          latestReviewIsCurrentHead: false,
-          reviewRunCompletedClean: true
+    copilotReviewStrategy: 'draft-only-explicit',
+    runCopilotReviewGateFn: async ({ argv }) => {
+      receivedArgs = argv;
+      return {
+        exitCode: 0,
+        report: {
+          status: 'pass',
+          gateState: 'ready',
+          reasons: ['current-head-review-run-completed-clean'],
+          summary: {
+            actionableCommentCount: 0,
+            actionableThreadCount: 0
+          },
+          signals: {
+            hasCurrentHeadReview: false,
+            latestReviewIsCurrentHead: false,
+            reviewRunCompletedClean: true
+          }
         }
-      }
-    })
+      };
+    }
   });
 
+  assert.ok(receivedArgs.includes('--copilot-review-strategy'));
+  assert.ok(receivedArgs.includes('draft-only-explicit'));
   assert.equal(result.ok, true);
   assert.deepEqual(result.report, {
     status: 'pass',
@@ -994,6 +1714,7 @@ test('runMergeSync fails closed when current-head Copilot comments remain unreso
         argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '124', '--repo', 'owner/repo'],
         repoRoot,
         ensureGhCliFn: () => {},
+        readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
         readPrInfoFn: () => ({
           number: 124,
           state: 'OPEN',
@@ -1046,6 +1767,7 @@ test('runMergeSync includes review clearance evidence when clean current-head ad
     ],
     repoRoot,
     ensureGhCliFn: () => {},
+    readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
     readPrInfoFn: () => ({
       number: 127,
         state: 'OPEN',
@@ -1119,6 +1841,7 @@ test('runMergeSync fails closed when the head repository plane is outside the tr
         argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '130', '--repo', 'LabVIEW-Community-CI-CD/compare-vi-cli-action'],
         repoRoot,
         ensureGhCliFn: () => {},
+        readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
         readPrInfoFn: () => ({
           number: 130,
           state: 'OPEN',
@@ -1163,6 +1886,7 @@ test('runMergeSync does not query promotion state when the PR is already merged'
     argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '125', '--repo', 'owner/repo'],
     repoRoot,
     ensureGhCliFn: () => {},
+    readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
     readPrInfoFn: () => ({
       number: 125,
       state: 'MERGED',
@@ -1190,6 +1914,7 @@ test('runMergeSync rejects repo slugs with extra path segments', async () => {
         argv: ['node', 'tools/priority/merge-sync-pr.mjs', '--pr', '126', '--repo', 'owner/repo/extra'],
         repoRoot,
         ensureGhCliFn: () => {},
+        readRepositoryMergeCapabilitiesFn: () => buildRepositoryMergeCapabilities(),
         readPrInfoFn: () => ({
           number: 126,
           state: 'OPEN',

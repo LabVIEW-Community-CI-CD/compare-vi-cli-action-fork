@@ -33,6 +33,8 @@ Keep it short, stable, and helper-oriented. Deep runbooks belong in checked-in d
 - Prefer the local parity loop before repeated GitHub Actions cycles:
   - `pwsh -NoLogo -NoProfile -File tools/Run-NonLVChecksInDocker.ps1 -UseToolsImage`
   - `pwsh -NoLogo -NoProfile -File tools/Run-NonLVChecksInDocker.ps1 -UseToolsImage -NILinuxReviewSuite`
+  - Treat `tools/PrePush-Checks.ps1` as the blocking rendered-review gate and `-NILinuxReviewSuite` as the broad
+    flag-combination certification lane.
 - Detached unattended delivery surfaces:
   - `node tools/npm/run-script.mjs priority:delivery:agent:ensure`
   - `node tools/npm/run-script.mjs priority:delivery:agent:status`
@@ -88,6 +90,8 @@ Keep it short, stable, and helper-oriented. Deep runbooks belong in checked-in d
 - Keep bulky diagnostics out of source; prefer issue attachments or generated artifact folders.
 - Use vendor resolvers from `tools/VendorTools.psm1` rather than ad-hoc PATH lookups.
 - For multiline GitHub bodies in mixed Windows/WSL shells, use `--body-file`.
+  For issue comments, prefer `pwsh -File tools/Post-IssueComment.ps1 -Issue <number> -BodyFile <path>`
+  over inline `gh issue comment --body "..."`.
 
 ## Handoff And Live State
 
@@ -105,9 +109,17 @@ Keep it short, stable, and helper-oriented. Deep runbooks belong in checked-in d
 ## Local Gates
 
 - `tools/PrePush-Checks.ps1` consumes `tools/policy/prepush-known-flag-scenarios.json`.
-- Exactly one active known-flag scenario is allowed in that checked-in contract at a time.
-- The deterministic top-level receipt is
-  `tests/results/_agent/pre-push-ni-image/known-flag-scenario-report.json`.
+- Exactly one active scenario pack is allowed in that checked-in contract at a time.
+- Deterministic top-level receipts:
+  - `tests/results/_agent/pre-push-ni-image/known-flag-scenario-report.json`
+  - `tests/results/_agent/pre-push-ni-image/post-results-rendering-certification-report.json`
+  - `tests/results/_agent/pre-push-ni-image/transport-smoke-report.json`
+  - `tests/results/_agent/pre-push-ni-image/vi-history-smoke-report.json`
+- The post-results rendering certification report is the explicit semantic gate for the
+  active scenario pack; transport and VI-history reports remain separate support lanes.
+- The pre-push transport smoke lane is intentionally minimal. Broad flag-combination sweeps now belong in
+  `tests/results/docker-tools-parity/ni-linux-review-suite/flag-combination-certification.json` and the companion
+  Markdown/HTML artifacts emitted by `tools/Invoke-NILinuxReviewSuite.ps1`.
 
 ## References
 

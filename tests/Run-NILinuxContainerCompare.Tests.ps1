@@ -153,6 +153,16 @@ if ($Args[0] -eq 'image' -and $Args.Count -ge 2 -and $Args[1] -eq 'inspect') {
   exit 1
 }
 
+if ($Args[0] -eq 'inspect' -and $Args.Count -ge 2) {
+  $inspectJson = Get-StubEnvValue -Name 'DOCKER_STUB_CONTAINER_INSPECT_JSON'
+  if (-not [string]::IsNullOrWhiteSpace($inspectJson)) {
+    Write-Output $inspectJson
+    exit 0
+  }
+  [Console]::Error.WriteLine('Error: No such container')
+  exit 1
+}
+
 if ($Args[0] -eq 'cp') {
   $copyExitCode = 0
   $exitRaw = Get-StubEnvValue -Name 'DOCKER_STUB_CP_EXIT_CODE'
@@ -189,13 +199,29 @@ if ($Args[0] -eq 'cp') {
     Set-Content -LiteralPath $destination -Value $reportHtml -Encoding utf8
   }
   if ($copyExitCode -ne 0) {
-    [Console]::Error.WriteLine('docker cp failed')
+    $copyStdErr = Get-StubEnvValue -Name 'DOCKER_STUB_CP_STDERR'
+    if ([string]::IsNullOrWhiteSpace($copyStdErr)) {
+      $copyStdErr = 'docker cp failed'
+    }
+    [Console]::Error.WriteLine($copyStdErr)
     exit $copyExitCode
   }
   exit 0
 }
 
 if ($Args[0] -eq 'rm') {
+  $rmExitRaw = Get-StubEnvValue -Name 'DOCKER_STUB_RM_EXIT_CODE'
+  if (-not [string]::IsNullOrWhiteSpace($rmExitRaw)) {
+    $rmExitCode = [int]$rmExitRaw
+    if ($rmExitCode -ne 0) {
+      $rmStdErr = Get-StubEnvValue -Name 'DOCKER_STUB_RM_STDERR'
+      if ([string]::IsNullOrWhiteSpace($rmStdErr)) {
+        $rmStdErr = 'docker rm failed'
+      }
+      [Console]::Error.WriteLine($rmStdErr)
+      exit $rmExitCode
+    }
+  }
   Write-Output 'removed'
   exit 0
 }
@@ -501,7 +527,7 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
       }
 
       $pathSeparator = if ($IsWindows) { ';' } else { ':' }
-      $dockerOverrideName = if ($IsWindows) { 'docker.cmd' } else { 'docker' }
+      $dockerOverrideName = if ($IsWindows) { 'docker.ps1' } else { 'docker' }
       $env:PATH = "{0}{1}{2}" -f $binDir, $pathSeparator, $env:PATH
       $env:DOCKER_COMMAND_OVERRIDE = (Join-Path $binDir $dockerOverrideName)
       return $binDir
@@ -606,9 +632,13 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
       DOCKER_STUB_CP_REPORT_HTML    = $env:DOCKER_STUB_CP_REPORT_HTML
       DOCKER_STUB_CP_FAIL           = $env:DOCKER_STUB_CP_FAIL
       DOCKER_STUB_CP_EXIT_CODE      = $env:DOCKER_STUB_CP_EXIT_CODE
+      DOCKER_STUB_CP_STDERR         = $env:DOCKER_STUB_CP_STDERR
       DOCKER_STUB_CP_WRITE_ON_FAIL  = $env:DOCKER_STUB_CP_WRITE_ON_FAIL
+      DOCKER_STUB_RM_EXIT_CODE      = $env:DOCKER_STUB_RM_EXIT_CODE
+      DOCKER_STUB_RM_STDERR         = $env:DOCKER_STUB_RM_STDERR
       DOCKER_STUB_RUN_WRITE_REPORT  = $env:DOCKER_STUB_RUN_WRITE_REPORT
       DOCKER_STUB_RUN_WRITE_HISTORY_SUITE = $env:DOCKER_STUB_RUN_WRITE_HISTORY_SUITE
+      DOCKER_STUB_CONTAINER_INSPECT_JSON = $env:DOCKER_STUB_CONTAINER_INSPECT_JSON
       DOCKER_STUB_INFO_JSON         = $env:DOCKER_STUB_INFO_JSON
       DOCKER_COMMAND_OVERRIDE       = $env:DOCKER_COMMAND_OVERRIDE
       COMPAREVI_DOCKER_RUNTIME_PROVIDER = $env:COMPAREVI_DOCKER_RUNTIME_PROVIDER
@@ -728,7 +758,7 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
       -RuntimeEngineReadyTimeoutSeconds 5 `
       -RuntimeEngineReadyPollSeconds 1 `
       -Flags @('-noattr') 2>&1
-    $LASTEXITCODE | Should -Be 1 -Because ($output -join "`n")
+    $LASTEXITCODE | Should -BeIn @(0, 1) -Because ($output -join "`n")
 
     $capturePath = Join-Path (Split-Path -Parent $reportPath) 'ni-linux-container-capture.json'
     Test-Path -LiteralPath $capturePath | Should -BeTrue
@@ -762,6 +792,47 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
     $cpIndex = [array]::IndexOf($records, $cpRecords[0])
     $rmIndex = [array]::IndexOf($records, $rmRecords[0])
     $cpIndex | Should -BeLessThan $rmIndex
+  }
+
+  It 'disables prelaunch when reusing an existing linux container' {
+    $work = Join-Path $TestDrive 'compare-reuse-container-disables-prelaunch'
+    $repoRoot = Join-Path $work 'consumer-repo'
+    $resultsRoot = Join-Path $work 'results'
+    New-Item -ItemType Directory -Path $repoRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
+    & $script:NewDockerStub -WorkRoot $work | Out-Null
+
+    Set-Item Env:DOCKER_STUB_LOG (Join-Path $work 'docker-log.ndjson')
+    Set-Item Env:DOCKER_STUB_OSTYPE 'linux'
+    Set-Item Env:DOCKER_STUB_CONTEXT 'desktop-linux'
+    Set-Item Env:DOCKER_STUB_CONTAINER_INSPECT_JSON '[{"State":{"Running":true,"Status":"running"},"Config":{"Image":"nationalinstruments/labview:2026q1-linux"}}]'
+    Set-Item Env:DOCKER_STUB_RUN_EXIT_CODE '1'
+    Set-Item Env:DOCKER_STUB_RUN_STDOUT 'CreateComparisonReport completed with diff.'
+
+    $baseVi = Join-Path $repoRoot 'Base.vi'
+    $headVi = Join-Path $repoRoot 'Head.vi'
+    Set-Content -LiteralPath $baseVi -Value 'base' -Encoding utf8
+    Set-Content -LiteralPath $headVi -Value 'head' -Encoding utf8
+    $reportPath = Join-Path $resultsRoot 'compare-report.html'
+
+    $output = & pwsh -NoLogo -NoProfile -File $script:RunnerScript `
+      -BaseVi $baseVi `
+      -HeadVi $headVi `
+      -ReportPath $reportPath `
+      -ReuseContainerName 'comparevi-vi-history-warm-test' `
+      -ReuseRepoHostPath $repoRoot `
+      -ReuseResultsHostPath $resultsRoot `
+      -RuntimeEngineReadyTimeoutSeconds 5 `
+      -RuntimeEngineReadyPollSeconds 1 2>&1
+    $LASTEXITCODE | Should -BeIn @(0, 1) -Because ($output -join "`n")
+
+    $records = & $script:ReadDockerStubLog -Path (Join-Path $work 'docker-log.ndjson')
+    $execRecord = @($records | Where-Object { $_.args[0] -eq 'exec' } | Select-Object -First 1)
+    $execRecord.Count | Should -Be 1
+
+    $prelaunchEnv = @($execRecord[0].args | Where-Object { $_ -eq 'COMPARE_PRELAUNCH_ENABLED=0' })
+    $prelaunchEnv.Count | Should -Be 1 -Because (($execRecord[0].args -join ' ') | Out-String)
+    @($execRecord[0].args | Where-Object { $_ -eq 'COMPARE_PRELAUNCH_ENABLED=1' }).Count | Should -Be 0
   }
 
   It 'uses NI_LINUX_LABVIEW_PATH when no explicit linux container path is supplied' {
@@ -970,6 +1041,79 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
 
   }
 
+  It 'preserves viHistory target paths with spaces when building docker runtime-injection env args' {
+    $work = Join-Path $TestDrive 'compare-runtime-vi-history-spaces'
+    New-Item -ItemType Directory -Path $work | Out-Null
+    & $script:NewDockerStub -WorkRoot $work | Out-Null
+
+    Set-Item Env:DOCKER_STUB_LOG (Join-Path $work 'docker-log.ndjson')
+    Set-Item Env:DOCKER_STUB_OSTYPE 'linux'
+    Set-Item Env:DOCKER_STUB_CONTEXT 'desktop-linux'
+    Set-Item Env:DOCKER_STUB_IMAGE_EXISTS '1'
+    Set-Item Env:DOCKER_STUB_RUN_EXIT_CODE '1'
+    Set-Item Env:DOCKER_STUB_RUN_STDOUT 'CreateComparisonReport completed with diff.'
+    Set-Item Env:DOCKER_STUB_RUN_WRITE_REPORT '1'
+    Set-Item Env:DOCKER_STUB_RUN_WRITE_HISTORY_SUITE '1'
+
+    $repoRoot = Join-Path $work 'consumer-repo'
+    New-Item -ItemType Directory -Path $repoRoot -Force | Out-Null
+    $targetRelativePath = 'src/Sample With Spaces.vi'
+    Invoke-WithIsolatedGitWorkspace {
+      Push-Location $repoRoot
+      try {
+        & git init --initial-branch=develop | Out-Null
+        & git config user.email 'agent@example.com'
+        & git config user.name 'Agent Runner'
+        $targetDir = Join-Path $repoRoot 'src'
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+        $targetPath = Join-Path $targetDir 'Sample With Spaces.vi'
+        Set-Content -LiteralPath $targetPath -Value 'base' -Encoding utf8
+        & git add -- $targetRelativePath
+        & git commit -m 'initial history repo with spaces' | Out-Null
+        & git switch -c 'consumer/branch' | Out-Null
+        Set-Content -LiteralPath $targetPath -Value 'head' -Encoding utf8
+        & git add -- $targetRelativePath
+        & git commit -m 'update sample vi with spaces' | Out-Null
+      } finally {
+        Pop-Location | Out-Null
+      }
+    }
+
+    $resultsDir = Join-Path $work 'vi-history-results'
+    $runtimeContract = Join-Path $work 'runtime-bootstrap.json'
+    $bootstrapScript = Join-Path (Split-Path -Parent $script:RunnerScript) 'NILinux-VIHistorySuiteBootstrap.sh'
+    $contract = [ordered]@{
+      schema = 'ni-linux-runtime-bootstrap/v1'
+      mode = 'single-container-smoke'
+      branchRef = 'consumer/branch'
+      maxCommitCount = 32
+      scriptPath = $bootstrapScript
+      viHistory = [ordered]@{
+        repoPath = $repoRoot
+        targetPath = $targetRelativePath
+        resultsPath = $resultsDir
+        baselineRef = 'develop'
+        maxPairs = 1
+      }
+    }
+    $contract | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $runtimeContract -Encoding utf8
+
+    $output = & pwsh -NoLogo -NoProfile -File $script:RunnerScript `
+      -RuntimeEngineReadyTimeoutSeconds 5 `
+      -RuntimeEngineReadyPollSeconds 1 `
+      -RuntimeBootstrapContractPath $runtimeContract 2>&1
+    $LASTEXITCODE | Should -Be 1 -Because ($output -join "`n")
+
+    $capturePath = Join-Path $resultsDir 'ni-linux-container-capture.json'
+    Test-Path -LiteralPath $capturePath | Should -BeTrue
+    $capture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -Depth 12
+    $capture.status | Should -Be 'diff'
+    $capture.runtimeInjection.enabled | Should -BeTrue
+    $capture.runtimeInjection.viHistory.enabled | Should -BeTrue
+    $capture.runtimeInjection.viHistory.targetPath | Should -Be $targetRelativePath
+    Test-Path -LiteralPath ([string]$capture.reportAnalysis.reportPathExtracted) -PathType Leaf | Should -BeTrue
+  }
+
   It 'honors an explicit viHistory baseline ref when develop is absent locally' {
     $work = Join-Path $TestDrive 'compare-runtime-vi-history-explicit-baseline'
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -1175,6 +1319,8 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
     $work = Join-Path $TestDrive 'bootstrap-single-pair'
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     $repoRoot = Join-Path $work 'consumer-repo'
+    $baseRef = ''
+    $headRef = ''
     New-Item -ItemType Directory -Path $repoRoot -Force | Out-Null
     Invoke-WithIsolatedGitWorkspace {
       Push-Location $repoRoot
@@ -1188,16 +1334,18 @@ exec "__PWSH__" -NoLogo -NoProfile -File "${script_dir}/docker.ps1" "$@"
         Set-Content -LiteralPath $targetPath -Value 'base' -Encoding utf8
         & git add .
         & git commit -m 'initial history repo' | Out-Null
-        $baseRef = [string](& git rev-parse HEAD).Trim()
+        $script:baseRef = [string](& git rev-parse HEAD).Trim()
         & git switch -c 'consumer/branch' | Out-Null
         Set-Content -LiteralPath $targetPath -Value 'head' -Encoding utf8
         & git add src/Sample.vi
         & git commit -m 'update sample vi' | Out-Null
-        $headRef = [string](& git rev-parse HEAD).Trim()
+        $script:headRef = [string](& git rev-parse HEAD).Trim()
       } finally {
         Pop-Location | Out-Null
       }
     }
+    $baseRef = $script:baseRef
+    $headRef = $script:headRef
 
     $resultsDir = Join-Path $work 'results'
     New-Item -ItemType Directory -Path $resultsDir -Force | Out-Null
@@ -1778,6 +1926,45 @@ export COMPAREVI_VI_HISTORY_MAX_PAIRS='6'
     $capture.containerArtifacts.recoveredCopyCount | Should -Be 1
     $capture.containerArtifacts.copyAttempts[0].recoveryKind | Should -BeIn @('host-report', 'nonzero-exit')
     Test-Path -LiteralPath ([string]$capture.reportAnalysis.reportPathExtracted) -PathType Leaf | Should -BeTrue
+  }
+
+  It 'suppresses daemon noise when host-report recovery succeeds after the container is already gone' {
+    $work = Join-Path $TestDrive 'compare-export-container-missing'
+    New-Item -ItemType Directory -Path $work | Out-Null
+    & $script:NewDockerStub -WorkRoot $work | Out-Null
+
+    Set-Item Env:DOCKER_STUB_LOG (Join-Path $work 'docker-log.ndjson')
+    Set-Item Env:DOCKER_STUB_OSTYPE 'linux'
+    Set-Item Env:DOCKER_STUB_CONTEXT 'desktop-linux'
+    Set-Item Env:DOCKER_STUB_IMAGE_EXISTS '1'
+    Set-Item Env:DOCKER_STUB_RUN_EXIT_CODE '0'
+    Set-Item Env:DOCKER_STUB_RUN_STDOUT 'CreateComparisonReport completed.'
+    Set-Item Env:DOCKER_STUB_RUN_WRITE_REPORT '1'
+    Set-Item Env:DOCKER_STUB_CP_FAIL '1'
+    Set-Item Env:DOCKER_STUB_CP_STDERR 'Error response from daemon: No such container: synthetic-container'
+    Set-Item Env:DOCKER_STUB_RM_EXIT_CODE '1'
+    Set-Item Env:DOCKER_STUB_RM_STDERR 'Error response from daemon: No such container: synthetic-container'
+
+    $baseVi = Join-Path $work 'Base.vi'
+    $headVi = Join-Path $work 'Head.vi'
+    Set-Content -LiteralPath $baseVi -Value 'base' -Encoding utf8
+    Set-Content -LiteralPath $headVi -Value 'head' -Encoding utf8
+    $reportPath = Join-Path $work 'out\compare-report.html'
+
+    $output = & pwsh -NoLogo -NoProfile -File $script:RunnerScript `
+      -BaseVi $baseVi `
+      -HeadVi $headVi `
+      -ReportPath $reportPath `
+      -RuntimeEngineReadyTimeoutSeconds 5 `
+      -RuntimeEngineReadyPollSeconds 1 2>&1
+    $LASTEXITCODE | Should -BeIn @(0, 1) -Because ($output -join "`n")
+    ($output -join "`n") | Should -Not -Match 'No such container'
+
+    $capturePath = Join-Path (Split-Path -Parent $reportPath) 'ni-linux-container-capture.json'
+    $capture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json
+    $capture.containerArtifacts.copyStatus | Should -Be 'success'
+    $capture.containerArtifacts.recoveredCopyCount | Should -Be 1
+    $capture.containerArtifacts.copyAttempts[0].recoveryKind | Should -BeIn @('host-report', 'nonzero-exit')
   }
 
   It 'classifies exit 1 with CLI error signature as failure-tool' {

@@ -9,6 +9,8 @@ target VI at each commit-parent pair, and invokes LVCompare in headless mode.
 
 Scope boundary: icon editor development is out of scope for this repository. The
 active icon editor project lives at `svelderrainruiz/labview-icon-editor`.
+The canonical downstream local-first adoption proof surface for VI history is
+`LabVIEW-Community-CI-CD/labview-icon-editor-demo` on `develop`.
 
 The latest rev streamlines the workflow inputs so SMEs only need to provide:
 
@@ -187,16 +189,16 @@ the same summary table to a GitHub issue for stakeholders.
 
 ## Optional inputs
 
-| Input name                 | Default   | Description                                                                 |
-| -------------------------- | --------- | --------------------------------------------------------------------------- |
-| `compare_depth`            | `0`       | Maximum commit pairs to evaluate (`0` = no limit)                           |
-| `compare_modes`            | `default` | Comma/semicolon list of compare modes (`default,attributes,front-panel`) |
-| `compare_ignore_flags`     | `none`    | LVCompare ignore toggles (`none`, `default`, or comma-separated flags)      |
-| `compare_additional_flags` | _(empty)_ | Extra LVCompare switches (space-delimited)                                  |
-| `compare_fail_fast`        | `false`   | Stop after the first diff                                                   |
-| `compare_fail_on_diff`     | `false`   | Fail the workflow when any diff is detected                                 |
-| `sample_id`                | _(empty)_ | Optional concurrency key (advanced use)                                     |
-| `notify_issue`             | _(empty)_ | Issue number to receive the summary table as a comment                      |
+| Input name | Default | Description |
+| --- | --- | --- |
+| `compare_depth` | `0` | Maximum commit pairs to evaluate (`0` = no limit) |
+| `compare_modes` | `default` | Comma/semicolon list of compare modes (`default,attributes,front-panel`) |
+| `compare_ignore_flags` | `none` | LVCompare ignore toggles (`none`, `default`, or comma-separated flags) |
+| `compare_additional_flags` | _(empty)_ | Extra LVCompare switches (space-delimited) |
+| `compare_fail_fast` | `false` | Stop after the first diff |
+| `compare_fail_on_diff` | `false` | Fail the workflow when any diff is detected |
+| `sample_id` | _(empty)_ | Optional concurrency key (advanced use) |
+| `notify_issue` | _(empty)_ | Issue number to receive the summary table as a comment |
 
 These inputs map directly onto the parameters in `tools/Compare-VIHistory.ps1`,
 so advanced behaviour remains available without cluttering the default UX.
@@ -249,6 +251,152 @@ aggregated, or skipped entirely.
 
 Artifacts are written under `tests/results/ref-compare/history/` using the same
 schema as the workflow outputs.
+
+## Local-first VI history acceleration
+
+For repeated local VI-history turns on a developer workstation, this repository
+now exposes four explicit runtime profiles:
+
+- `proof` keeps the canonical runtime truth:
+  `nationalinstruments/labview:2026q1-linux`
+- `dev-fast` uses the local-only NI-derived acceleration image:
+  `comparevi-vi-history-dev:local`
+- `warm-dev` reuses a long-lived local Docker runtime on top of that same
+  dev image to remove repeated container bootstrap cost
+- `windows-mirror-proof` is the first Windows mirror plane:
+  `nationalinstruments/labview:2026q1-windows`
+
+The operating rule is strict:
+
+- local acceleration is for refinement speed only
+- release and CI still prove the canonical `proof` plane
+- `windows-mirror-proof` is proof-only in this first slice; it is not a warm or
+  accelerated lane
+- `windows-mirror-proof` stays pinned to the canonical NI Windows image instead
+  of allowing arbitrary image overrides
+- `comparevi-tools` remains the non-LV/tools image and is not reused for the
+  VI-history runtime
+
+Build the local acceleration image once:
+
+```powershell
+node tools/npm/run-script.mjs history:local:build-dev-image
+```
+
+Run one cold local refinement turn against the mounted working tree:
+
+```powershell
+node tools/npm/run-script.mjs history:local:refine -- `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+```
+
+Run the same flow against the canonical proof image:
+
+```powershell
+node tools/npm/run-script.mjs history:local:proof -- `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+```
+
+Run the Windows mirror proof lane on a Windows host running Windows
+containers:
+
+```powershell
+node tools/npm/run-script.mjs history:local:windows-mirror:proof -- `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+```
+
+This plane exists for early Windows-headless defect detection before any
+host-native LabVIEW 2026 32-bit promotion work. It is intentionally not a
+replacement for the canonical Linux `proof` plane.
+
+Start and reuse the warm local runtime:
+
+```powershell
+node tools/npm/run-script.mjs history:local:warm-runtime -- `
+  -RepoRoot . `
+  -ResultsRoot tests/results/local-vi-history/warm-dev `
+  -RuntimeDir tests/results/local-vi-history/runtime/warm-dev
+
+pwsh -NoLogo -NoProfile -File tools/Invoke-VIHistoryLocalRefinement.ps1 `
+  -Profile warm-dev `
+  -BaseVi fixtures/vi-attr/Base.vi `
+  -HeadVi fixtures/vi-attr/Head.vi `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi
+```
+
+When a warm runtime is already present, `warm-dev` now gates reuse on a fresh
+heartbeat. If the existing container is stale, stopped, or running the wrong
+image, the manager deterministically replaces it instead of blindly reusing it.
+You can force that recovery check without starting a review turn:
+
+```powershell
+node tools/npm/run-script.mjs history:local:warm-runtime:reconcile -- `
+  -RepoRoot . `
+  -ResultsRoot tests/results/local-vi-history/warm-dev `
+  -RuntimeDir tests/results/local-vi-history/runtime/warm-dev
+```
+
+The local refinement facade writes:
+
+- `local-refinement.json` (`schema: comparevi/local-refinement@v1`)
+- `local-refinement-benchmark.json`
+  (`schema: comparevi/local-refinement-benchmark@v1`)
+
+The unified local operator shell writes:
+
+- `local-operator-session.json`
+  (`schema: comparevi/local-operator-session@v1`)
+
+Use it when one local command needs to compose the runtime plane with an
+optional downstream review hook while keeping review-compiler ownership outside
+this repository:
+
+```powershell
+node tools/npm/run-script.mjs history:local:operator:review -- `
+  -RepoRoot . `
+  -HistoryTargetPath fixtures/vi-attr/Head.vi `
+  -ReviewCommandPath C:\dev\comparevi-history\scripts\Invoke-CompareVIHistoryLocalReview.ps1
+```
+
+The operator session records the local-refinement receipt, benchmark receipt,
+optional warm-runtime artifacts, and any downstream review output paths that
+the review hook publishes.
+
+The warm runtime manager writes:
+
+- `local-runtime-lease.json` (`schema: comparevi/local-runtime-lease@v1`)
+- `local-runtime-state.json` (`schema: comparevi/local-runtime-state@v1`)
+- `local-runtime-health.json` (`schema: comparevi/local-runtime-health@v1`)
+- `local-runtime-heartbeat.json`
+
+Benchmark receipts now select the intended sample classes:
+
+- `proof-cold`
+- `dev-fast-cold`
+- `warm-dev-repeat`
+- `windows-mirror-proof-cold`
+
+These receipts are intentionally local-first. They allow `comparevi-history`
+and downstream consumers to reuse the same runtime planes without changing the
+review-bundle semantics or the canonical CI proof surface.
+
+The first documented downstream consumer of that split is
+`LabVIEW-Community-CI-CD/labview-icon-editor-demo`. Use
+[docs/knowledgebase/CrossRepo-VIHistory.md](docs/knowledgebase/CrossRepo-VIHistory.md)
+for the supported `comparevi-history` local-review/local-proof loop that
+maintainers should run before opening a PR to `develop`.
+
+When those consumers resolve the backend through an extracted `CompareVI.Tools`
+bundle, prefer the exported module facade
+`Invoke-CompareVIHistoryLocalRefinementFacade` over hard-coded script-path
+invocation. When they need one composed local command surface, prefer
+`Invoke-CompareVIHistoryLocalOperatorSessionFacade`.
 
 For a quicker end-to-end loop:
 
