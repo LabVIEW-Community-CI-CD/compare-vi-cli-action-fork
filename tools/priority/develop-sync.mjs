@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -234,6 +234,46 @@ function requirePlaneTransitionEvidence({ remote, parityReport, branchClassTrace
   return planeTransition;
 }
 
+function buildActionFromParityReport({
+  remote,
+  repoRoot,
+  parityReportPath,
+  adminPaths,
+  branchClassTrace,
+  parityReport,
+  status,
+  exitCode,
+  error
+}) {
+  const planeTransition = requirePlaneTransitionEvidence({
+    remote,
+    parityReport,
+    branchClassTrace,
+    parityReportPath
+  });
+
+  return {
+    remote,
+    status,
+    parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
+    adminPaths,
+    branchClassTrace,
+    planeTransition,
+    syncMode: parityReport?.syncResult?.mode ?? 'direct-push',
+    syncReason: parityReport?.syncResult?.reason ?? 'direct-push',
+    parityConverged:
+      typeof parityReport?.syncResult?.parityConverged === 'boolean'
+        ? parityReport.syncResult.parityConverged
+        : parityReport?.tipDiff?.fileCount === 0,
+    protectedSync: parityReport?.syncResult?.protectedSync ?? null,
+    parityRemediation: parityReport?.syncResult?.parityRemediation ?? null,
+    recommendation: parityReport?.recommendation ?? null,
+    commitDivergence: parityReport?.commitDivergence ?? null,
+    exitCode,
+    error
+  };
+}
+
 export function runDevelopSync({
   repoRoot = getRepoRoot(),
   options = parseArgs(),
@@ -243,33 +283,98 @@ export function runDevelopSync({
   const remotes = resolveForkRemoteTargets(options.forkRemote, env);
   const actions = [];
   const reportPath = path.isAbsolute(options.reportPath) ? options.reportPath : path.join(repoRoot, options.reportPath);
+  const reportHint = path.relative(repoRoot, reportPath).replace(/\\/g, '/');
   const branchClassTrace = buildDevelopSyncBranchClassTrace(repoRoot);
+  const failedRemotes = [];
+  let firstFailure = null;
 
   for (const remote of remotes) {
     const parityReportPath = buildParityReportPath(repoRoot, remote);
     const adminPaths = buildSyncAdminPaths({ repoRoot, remote, env, spawnSyncFn });
     const args = buildPwshArgs({ repoRoot, remote, parityReportPath });
+    if (existsSync(parityReportPath)) {
+      rmSync(parityReportPath, { force: true });
+    }
     const result = spawnSyncFn('pwsh', args, {
       cwd: repoRoot,
       stdio: 'inherit',
       encoding: 'utf8'
     });
     if (result.status !== 0) {
-      actions.push({
-        remote,
-        status: 'failed',
-        parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
-        adminPaths,
-        exitCode: result.status
-      });
-      writeDevelopSyncReport({
-        repoRoot,
-        reportPath,
-        remotes,
-        actions,
-        status: 'failed'
-      });
-      throw new Error(`priority:develop:sync failed for ${remote}.`);
+      const commandError = String(result.stderr ?? result.stdout ?? '').trim() || `pwsh exited with status ${result.status}`;
+      if (existsSync(parityReportPath)) {
+        let parityReport;
+        try {
+          parityReport = readJsonFile(parityReportPath);
+        } catch (error) {
+          actions.push({
+            remote,
+            status: 'failed',
+            parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
+            adminPaths,
+            branchClassTrace,
+            exitCode: result.status,
+            error: error.message
+          });
+          writeDevelopSyncReport({
+            repoRoot,
+            reportPath,
+            remotes,
+            actions,
+            status: 'failed'
+          });
+          throw new Error(`${error.message} report=${reportHint}`);
+        }
+        try {
+          actions.push(
+            buildActionFromParityReport({
+              remote,
+              repoRoot,
+              parityReportPath,
+              adminPaths,
+              branchClassTrace,
+              parityReport,
+              status: 'failed',
+              exitCode: result.status,
+              error: commandError
+            })
+          );
+          failedRemotes.push(remote);
+          firstFailure ??= new Error(`priority:develop:sync failed for ${remote}. report=${reportHint} error=${commandError}`);
+          continue;
+        } catch (error) {
+          actions.push({
+            remote,
+            status: 'failed',
+            parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
+            adminPaths,
+            branchClassTrace,
+            exitCode: result.status,
+            error: error.message
+          });
+          writeDevelopSyncReport({
+            repoRoot,
+            reportPath,
+            remotes,
+            actions,
+            status: 'failed'
+          });
+          throw new Error(`${error.message} report=${reportHint}`);
+        }
+      } else {
+        actions.push({
+          remote,
+          status: 'failed',
+          parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
+          adminPaths,
+          branchClassTrace,
+          exitCode: result.status,
+          error: commandError
+        });
+      }
+      failedRemotes.push(remote);
+      firstFailure ??= new Error(`priority:develop:sync failed for ${remote}. report=${reportHint} error=${commandError}`);
+      continue;
     }
     let parityReport;
     try {
@@ -289,16 +394,22 @@ export function runDevelopSync({
         actions,
         status: 'failed'
       });
-      throw error;
+      throw new Error(`${error.message} report=${reportHint}`);
     }
-    let planeTransition;
     try {
-      planeTransition = requirePlaneTransitionEvidence({
-        remote,
-        parityReport,
-        branchClassTrace,
-        parityReportPath
-      });
+      actions.push(
+        buildActionFromParityReport({
+          remote,
+          repoRoot,
+          parityReportPath,
+          adminPaths,
+          branchClassTrace,
+          parityReport,
+          status: 'ok',
+          exitCode: 0,
+          error: null
+        })
+      );
     } catch (error) {
       actions.push({
         remote,
@@ -315,23 +426,24 @@ export function runDevelopSync({
         actions,
         status: 'failed'
       });
-      throw error;
+      throw new Error(`${error.message} report=${reportHint}`);
     }
-    actions.push({
-      remote,
-      status: 'ok',
-      parityReportPath: path.relative(repoRoot, parityReportPath).replace(/\\/g, '/'),
-      adminPaths,
-      branchClassTrace,
-      planeTransition,
-      syncMode: parityReport?.syncResult?.mode ?? 'direct-push',
-      syncReason: parityReport?.syncResult?.reason ?? 'direct-push',
-      parityConverged:
-        typeof parityReport?.syncResult?.parityConverged === 'boolean'
-          ? parityReport.syncResult.parityConverged
-          : parityReport?.tipDiff?.fileCount === 0,
-      protectedSync: parityReport?.syncResult?.protectedSync ?? null
+  }
+  if (failedRemotes.length > 0) {
+    writeDevelopSyncReport({
+      repoRoot,
+      reportPath,
+      remotes,
+      actions,
+      status: 'failed'
     });
+    if (failedRemotes.length === 1 && firstFailure) {
+      throw firstFailure;
+    }
+    const firstFailureMessage = String(firstFailure?.message ?? 'unknown failure').trim();
+    throw new Error(
+      `priority:develop:sync failed for ${failedRemotes.join(', ')}. report=${reportHint} firstError=${firstFailureMessage}`
+    );
   }
   const report = writeDevelopSyncReport({
     repoRoot,
