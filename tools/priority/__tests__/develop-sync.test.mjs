@@ -150,21 +150,6 @@ test('Sync-OriginUpstreamDevelop routes GH013 through protected sync helper path
   const scriptPath = path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1');
   const source = readFileSyncImmediate(scriptPath, 'utf8');
 
-  assert.match(source, /function Resolve-RemoteRepositorySlug/);
-  assert.match(source, /function Get-ActiveBranchRules/);
-  assert.match(source, /function Get-ActiveBranchRuleTypes/);
-  assert.match(source, /function Get-ActiveBranchRulesetIds/);
-  assert.match(source, /function Get-RulesetCurrentUserBypassMode/);
-  assert.match(source, /function Get-ActiveProtectedSyncProbe/);
-  assert.match(source, /function Test-ActiveBranchRulesRequireProtectedSync/);
-  assert.match(source, /function Invoke-ProtectedBranchSync/);
-  assert.match(source, /rules\/branches\/\{1\}/);
-  assert.match(source, /rulesets\/\{1\}/);
-  assert.match(source, /EscapeDataString\(\$BranchName\)/);
-  assert.match(source, /return 'unknown'/);
-  assert.match(source, /Active branch rules require protected sync for \{0\}\/\{1\}; routing through protected sync helper/);
-  assert.match(source, /current actor can bypass them/);
-  assert.match(source, /protected-branch-rules/);
   assert.match(source, /function Test-GitHubProtectedBranchFailure/);
   assert.match(source, /function Get-ProtectedBranchSyncReason/);
   assert.match(source, /GH013/);
@@ -173,17 +158,47 @@ test('Sync-OriginUpstreamDevelop routes GH013 through protected sync helper path
   assert.match(source, /protected-develop-sync-pr\.mjs/);
   assert.match(source, /function Remove-RemoteBranchWithTransportFallback/);
   assert.match(source, /Protected branch rejected direct push to \{0\}\/\{1\}; routing through protected sync helper/);
-  assert.match(source, /Protected sync staged via PR path/);
+  assert.match(source, /Sync staged via PR-based path/);
   assert.match(source, /\$attemptSyncReason = Get-ProtectedBranchSyncReason -Message \$message/);
   assert.match(source, /\$attemptSyncMode = 'direct-push'/);
-  assert.match(source, /\$attemptSyncMode = \$protectedSyncResult\.syncMethod/);
-  assert.match(source, /if \(\$syncMethod -eq 'fork-sync'\)/);
+  assert.match(source, /\$attemptSyncMode = \[string\]\(\$attemptProtectedSync\['syncMethod'\] \?\? 'protected-pr'\)/);
+  assert.match(source, /if \(\$attemptSyncMode -eq 'fork-sync'\)/);
   assert.match(source, /Remove-RemoteBranchWithTransportFallback -Remote \$HeadRemote -BranchName \$syncBranch/);
   assert.match(source, /\$syncMode = \$attemptSyncMode/);
   assert.match(source, /if \(\$tipDiffCount -ne 0 -and \$syncMode -eq 'protected-pr'\)/);
-  assert.match(source, /if \(\$attemptSyncMode -eq 'direct-push' -or \$attemptSyncMode -eq 'fork-sync'\)/);
+  assert.match(source, /if \(\(\$attemptSyncMode -eq 'direct-push' -and \$attemptPushTransport\) -or \$attemptSyncMode -eq 'fork-sync'\)/);
   assert.match(source, /else \{\s*Write-Host \("\[sync\] Parity OK for \{0\} vs \{1\}"/s);
-  assert.equal((source.match(/Set-Content -LiteralPath \$parityReportPath -Encoding utf8/g) ?? []).length, 1);
+  assert.match(source, /function Write-SyncParityReport/);
+});
+
+test('Sync-OriginUpstreamDevelop classifies diverged fork planes before retrying direct push', () => {
+  const scriptPath = path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1');
+  const source = readFileSyncImmediate(scriptPath, 'utf8');
+
+  assert.match(source, /function Test-GitPushNonFastForwardFailure/);
+  assert.match(source, /function Refresh-ObservedRemoteTrackingRef/);
+  assert.match(source, /function Get-DivergedDevelopRemediationBranchName/);
+  assert.match(source, /function Test-DraftSafeParityRemediation/);
+  assert.match(source, /diverged-develop-remediation-pr\.mjs/);
+  assert.match(source, /Diverged fork plane detected for \{0\}\/\{1\}; staging deterministic parity remediation/);
+  assert.match(source, /Remove-Item -LiteralPath \$attemptParityRemediationReportPath -Force/);
+  assert.match(source, /\$attemptParityRemediation = Get-Content -LiteralPath \$attemptParityRemediationReportPath -Raw \| ConvertFrom-Json -AsHashtable/);
+  assert.match(source, /\$attemptSyncMode = \[string\]\(\$attemptParityRemediation\['syncMethod'\] \?\? 'pull-request-draft'\)/);
+  assert.match(source, /diverged-fork-plane-remediation: unable to stage remediation/);
+  assert.match(source, /Remote already converged for \{0\}\/\{1\} before remediation staging completed/);
+  assert.match(source, /\[string\]\$parityPullRequest\['state'\] -eq 'OPEN'/);
+  assert.match(source, /\[string\]\$parityPullRequest\['headRefName'\] -eq \$expectedHeadRef/);
+  assert.match(source, /\[string\]\$parityPullRequest\['baseRefName'\] -eq \$expectedBaseRef/);
+  assert.match(source, /Test-DraftSafeParityRemediation -ParityRemediation \$attemptParityRemediation -ExpectedHeadRefName \$syncBranch -ExpectedBaseRefName \$Branch/);
+  assert.match(source, /remediation report is not draft-safe/);
+  assert.match(source, /elseif \(\$ParityRemediation -and \$ParityRemediationReportPath\)/);
+  assert.match(source, /pull-request-draft-remediation: draft parity remediation staged for/);
+  assert.match(source, /Refresh-ObservedRemoteTrackingRef -Remote \$HeadRemote -BranchName \$Branch/);
+  assert.match(source, /\$attemptSyncReason = 'diverged-fork-plane'/);
+  assert.match(source, /\$attemptSyncReason = 'remote-already-converged'/);
+  assert.match(source, /Remote already converged for \{0\}\/\{1\} after non-fast-forward rejection/);
+  assert.match(source, /diverged-fork-plane: direct push to \{0\}\/\{1\} cannot fast-forward/);
+  assert.match(source, /if \(Test-GitPushNonFastForwardFailure -Message \$message\)/);
 });
 
 test('buildSyncAdminPaths uses git-common-dir for repo-wide lock serialization in a linked worktree', () => {
@@ -197,7 +212,10 @@ test('buildSyncAdminPaths uses git-common-dir for repo-wide lock serialization i
 
   assert.equal(adminPaths.gitCommonDir, expectedGitCommonDir);
   assert.equal(adminPaths.lockPath, expectedLockPath);
-  assert.equal(adminPaths.lockPath.startsWith(adminPaths.gitCommonDir), true);
+  assert.notEqual(
+    adminPaths.lockPath,
+    path.join(repoRoot, '.git', buildSyncLockName({ baseRemote: 'upstream', headRemote: 'origin', branch: 'develop' }))
+  );
 });
 
 test('runDevelopSync writes admin-path diagnostics when the underlying sync command fails', async (t) => {
@@ -229,6 +247,734 @@ test('runDevelopSync writes admin-path diagnostics when the underlying sync comm
   assert.equal(report.status, 'failed');
   assert.equal(report.actions[0].status, 'failed');
   assert.equal(report.actions[0].adminPaths.lockPath.endsWith('.lock'), true);
+});
+
+test('runDevelopSync preserves diverged fork classification when the sync script exits non-zero', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-report-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const parityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  await mkdir(path.dirname(parityReportPath), { recursive: true });
+  await writeFile(
+    parityReportPath,
+    JSON.stringify({
+      schema: 'origin-upstream-parity@v1',
+      status: 'ok',
+      tipDiff: { fileCount: 4 },
+      commitDivergence: { baseOnly: 2, headOnly: 2 },
+      recommendation: {
+        code: 'bidirectional-drift',
+        summary: 'Both refs diverged with tree drift.'
+      },
+      planeTransition: {
+        from: 'upstream',
+        to: 'origin',
+        action: 'sync',
+        via: 'priority:develop:sync'
+      },
+      syncResult: {
+        mode: 'direct-push',
+        reason: 'diverged-fork-plane',
+        parityConverged: false,
+        planeTransition: {
+          from: 'upstream',
+          to: 'origin',
+          action: 'sync',
+          via: 'priority:develop:sync'
+        },
+        failureMessage: 'non-fast-forward'
+      }
+    }, null, 2),
+    'utf8'
+  );
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'origin',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            writeFileSyncImmediate(
+              parityReportPath,
+              JSON.stringify({
+                schema: 'origin-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 4 },
+                commitDivergence: { baseOnly: 2, headOnly: 2 },
+                recommendation: {
+                  code: 'bidirectional-drift',
+                  summary: 'Both refs diverged with tree drift.'
+                },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'origin',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'diverged-fork-plane',
+                  parityConverged: false,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'origin',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  },
+                  failureMessage: 'non-fast-forward'
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 1, stdout: '', stderr: 'non-fast-forward' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /priority:develop:sync failed for origin/i
+  );
+
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.actions[0].status, 'failed');
+  assert.equal(report.actions[0].syncMode, 'direct-push');
+  assert.equal(report.actions[0].syncReason, 'diverged-fork-plane');
+  assert.equal(report.actions[0].parityConverged, false);
+  assert.equal(report.actions[0].recommendation.code, 'bidirectional-drift');
+  assert.equal(report.actions[0].commitDivergence.headOnly, 2);
+});
+
+test('runDevelopSync reports every requested remote before failing aggregate all-remote sync', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-all-remotes-report-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const originParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(originParityReportPath), { recursive: true });
+
+  const writeParityReport = (parityReportPath, remote, divergence) => {
+    writeFileSyncImmediate(
+      parityReportPath,
+      JSON.stringify({
+        schema: `${remote}-upstream-parity@v1`,
+        status: 'ok',
+        tipDiff: { fileCount: divergence },
+        commitDivergence: { baseOnly: divergence, headOnly: divergence },
+        recommendation: {
+          code: 'bidirectional-drift',
+          summary: `Both refs diverged with tree drift for ${remote}.`
+        },
+        planeTransition: {
+          from: 'upstream',
+          to: remote,
+          action: 'sync',
+          via: 'priority:develop:sync'
+        },
+        syncResult: {
+          mode: 'direct-push',
+          reason: 'diverged-fork-plane',
+          parityConverged: false,
+          planeTransition: {
+            from: 'upstream',
+            to: remote,
+            action: 'sync',
+            via: 'priority:develop:sync'
+          },
+          failureMessage: `${remote} non-fast-forward`
+        }
+      }, null, 2),
+      'utf8'
+    );
+  };
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  const attemptedRemotes = [];
+  let aggregateError;
+  try {
+    runDevelopSync({
+      repoRoot: tempRoot,
+      options: {
+        forkRemote: 'all',
+        reportPath
+      },
+      spawnSyncFn: (command, args, options = {}) => {
+        if (command === 'git') {
+          return spawnSync(command, args, {
+            ...options,
+            cwd: tempRoot,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe']
+          });
+        }
+        if (command === 'pwsh') {
+          const remote = args[args.indexOf('-HeadRemote') + 1];
+          attemptedRemotes.push(remote);
+          const parityReportPath = remote === 'origin' ? originParityReportPath : personalParityReportPath;
+          const divergence = remote === 'origin' ? 3 : 5;
+          writeParityReport(parityReportPath, remote, divergence);
+          return { status: 1, stdout: '', stderr: `${remote} non-fast-forward` };
+        }
+        throw new Error(`Unexpected command ${command}`);
+      }
+    });
+    assert.fail('Expected aggregate all-remote sync to fail.');
+  } catch (error) {
+    aggregateError = error;
+  }
+
+  assert.deepEqual(attemptedRemotes, ['origin', 'personal']);
+  assert.match(aggregateError.message, /priority:develop:sync failed for origin, personal/i);
+  assert.match(aggregateError.message, /report=develop-sync-report\.json/i);
+  assert.match(aggregateError.message, /firstError=.*origin non-fast-forward/i);
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(report.remotes, ['origin', 'personal']);
+  assert.equal(report.actions.length, 2);
+  assert.deepEqual(
+    report.actions.map((action) => [action.remote, action.status, action.syncReason]),
+    [
+      ['origin', 'failed', 'diverged-fork-plane'],
+      ['personal', 'failed', 'diverged-fork-plane']
+    ]
+  );
+  assert.equal(report.actions[1].commitDivergence.headOnly, 5);
+});
+
+test('runDevelopSync continues to later remotes after an earlier all-remote failure', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-all-remotes-mixed-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const originParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(originParityReportPath), { recursive: true });
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  const attemptedRemotes = [];
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'all',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            const remote = args[args.indexOf('-HeadRemote') + 1];
+            attemptedRemotes.push(remote);
+            if (remote === 'origin') {
+              writeFileSyncImmediate(
+                originParityReportPath,
+                JSON.stringify({
+                  schema: 'origin-upstream-parity@v1',
+                  status: 'ok',
+                  tipDiff: { fileCount: 2 },
+                  commitDivergence: { baseOnly: 1, headOnly: 1 },
+                  recommendation: {
+                    code: 'bidirectional-drift',
+                    summary: 'Both refs diverged with tree drift.'
+                  },
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'origin',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  },
+                  syncResult: {
+                    mode: 'direct-push',
+                    reason: 'diverged-fork-plane',
+                    parityConverged: false,
+                    planeTransition: {
+                      from: 'upstream',
+                      to: 'origin',
+                      action: 'sync',
+                      via: 'priority:develop:sync'
+                    }
+                  }
+                }, null, 2),
+                'utf8'
+              );
+              return { status: 1, stdout: '', stderr: 'origin non-fast-forward' };
+            }
+            writeFileSyncImmediate(
+              personalParityReportPath,
+              JSON.stringify({
+                schema: 'personal-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'personal',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'personal',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 0, stdout: '', stderr: '' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /priority:develop:sync failed for origin/i
+  );
+
+  assert.deepEqual(attemptedRemotes, ['origin', 'personal']);
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(
+    report.actions.map((action) => [action.remote, action.status]),
+    [
+      ['origin', 'failed'],
+      ['personal', 'ok']
+    ]
+  );
+  assert.equal(report.actions[1].parityConverged, true);
+});
+
+test('runDevelopSync continues after a command failure without fresh parity evidence in all-remote mode', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-all-remotes-no-parity-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(personalParityReportPath), { recursive: true });
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  const attemptedRemotes = [];
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'all',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            const remote = args[args.indexOf('-HeadRemote') + 1];
+            attemptedRemotes.push(remote);
+            if (remote === 'origin') {
+              return { status: 1, stdout: '', stderr: 'origin failed before parity rewrite' };
+            }
+            writeFileSyncImmediate(
+              personalParityReportPath,
+              JSON.stringify({
+                schema: 'personal-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'personal',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'personal',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 0, stdout: '', stderr: '' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /priority:develop:sync failed for origin/i
+  );
+
+  assert.deepEqual(attemptedRemotes, ['origin', 'personal']);
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(
+    report.actions.map((action) => [action.remote, action.status]),
+    [
+      ['origin', 'failed'],
+      ['personal', 'ok']
+    ]
+  );
+  assert.equal(report.actions[0].syncReason, undefined);
+  assert.equal(report.actions[0].error, 'origin failed before parity rewrite');
+});
+
+test('runDevelopSync fails fast on malformed rewritten parity evidence for a failed all-remote target', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-all-remotes-bad-failed-parity-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const originParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(originParityReportPath), { recursive: true });
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  const attemptedRemotes = [];
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'all',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            const remote = args[args.indexOf('-HeadRemote') + 1];
+            attemptedRemotes.push(remote);
+            if (remote === 'origin') {
+              writeFileSyncImmediate(
+                originParityReportPath,
+                JSON.stringify({
+                  schema: 'origin-upstream-parity@v1',
+                  status: 'ok',
+                  tipDiff: { fileCount: 2 },
+                  syncResult: {
+                    mode: 'direct-push',
+                    reason: 'diverged-fork-plane',
+                    parityConverged: false
+                  }
+                }, null, 2),
+                'utf8'
+              );
+              return { status: 1, stdout: '', stderr: 'origin non-fast-forward' };
+            }
+            writeFileSyncImmediate(
+              personalParityReportPath,
+              JSON.stringify({
+                schema: 'personal-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'personal',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'personal',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 0, stdout: '', stderr: '' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /missing required planeTransition metadata.*report=develop-sync-report\.json/i
+  );
+
+  assert.deepEqual(attemptedRemotes, ['origin']);
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(report.actions.map((action) => action.remote), ['origin']);
+});
+
+test('runDevelopSync fails fast on unreadable rewritten parity JSON for a failed all-remote target', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-all-remotes-bad-json-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const originParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(originParityReportPath), { recursive: true });
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  const attemptedRemotes = [];
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'all',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            const remote = args[args.indexOf('-HeadRemote') + 1];
+            attemptedRemotes.push(remote);
+            if (remote === 'origin') {
+              writeFileSyncImmediate(originParityReportPath, '{bad-json', 'utf8');
+              return { status: 1, stdout: '', stderr: 'origin non-fast-forward' };
+            }
+            writeFileSyncImmediate(
+              personalParityReportPath,
+              JSON.stringify({
+                schema: 'personal-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'personal',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'personal',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 0, stdout: '', stderr: '' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /Unable to read parity report.*report=develop-sync-report\.json/i
+  );
+
+  assert.deepEqual(attemptedRemotes, ['origin']);
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(report.actions.map((action) => action.remote), ['origin']);
+});
+
+test('runDevelopSync fails fast on invalid parity evidence before touching later all-remote targets', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-all-remotes-invalid-parity-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const originParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(originParityReportPath), { recursive: true });
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  const attemptedRemotes = [];
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'all',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            const remote = args[args.indexOf('-HeadRemote') + 1];
+            attemptedRemotes.push(remote);
+            if (remote === 'origin') {
+              writeFileSyncImmediate(
+                originParityReportPath,
+                JSON.stringify({
+                  schema: 'origin-upstream-parity@v1',
+                  status: 'ok',
+                  tipDiff: { fileCount: 0 },
+                  syncResult: {
+                    mode: 'direct-push',
+                    reason: 'direct-push',
+                    parityConverged: true
+                  }
+                }, null, 2),
+                'utf8'
+              );
+              return { status: 0, stdout: '', stderr: '' };
+            }
+            writeFileSyncImmediate(
+              personalParityReportPath,
+              JSON.stringify({
+                schema: 'personal-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'personal',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'personal',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 0, stdout: '', stderr: '' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /missing required planeTransition metadata.*report=develop-sync-report\.json/i
+  );
+
+  assert.deepEqual(attemptedRemotes, ['origin']);
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(report.actions.map((action) => action.remote), ['origin']);
+});
+
+test('runDevelopSync ignores stale parity reports when the failed invocation does not rewrite them', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-stale-parity-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const parityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  await mkdir(path.dirname(parityReportPath), { recursive: true });
+  await writeFile(
+    parityReportPath,
+    JSON.stringify({
+      schema: 'origin-upstream-parity@v1',
+      status: 'ok',
+      tipDiff: { fileCount: 0 },
+      planeTransition: {
+        from: 'upstream',
+        to: 'origin',
+        action: 'sync',
+        via: 'priority:develop:sync'
+      },
+      syncResult: {
+        mode: 'direct-push',
+        reason: 'stale-report',
+        parityConverged: true
+      }
+    }, null, 2),
+    'utf8'
+  );
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'origin',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            return { status: 1, stdout: '', stderr: 'failed without rewriting parity' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /priority:develop:sync failed for origin/i
+  );
+
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.actions[0].status, 'failed');
+  assert.equal(report.actions[0].syncReason, undefined);
+  assert.equal(report.actions[0].error, 'failed without rewriting parity');
 });
 
 test('runDevelopSync records protected sync mode details from the parity report', async (t) => {
@@ -290,6 +1036,38 @@ test('runDevelopSync records protected sync mode details from the parity report'
         });
       }
       if (command === 'pwsh') {
+        writeFileSyncImmediate(
+          parityReportPath,
+          JSON.stringify({
+            schema: 'origin-upstream-parity@v1',
+            status: 'ok',
+            tipDiff: { fileCount: 3 },
+            planeTransition: {
+              from: 'upstream',
+              to: 'origin',
+              action: 'sync',
+              via: 'priority:develop:sync'
+            },
+            syncResult: {
+              mode: 'protected-pr',
+              reason: 'protected-branch-gh013',
+              parityConverged: false,
+              protectedSync: {
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'origin',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                pullRequest: {
+                  number: 44,
+                  url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/44'
+                }
+              }
+            }
+          }, null, 2),
+          'utf8'
+        );
         return { status: 0, stdout: '', stderr: '' };
       }
       throw new Error(`Unexpected command ${command}`);
@@ -306,6 +1084,237 @@ test('runDevelopSync records protected sync mode details from the parity report'
   assert.equal(report.actions[0].planeTransition.from, 'upstream');
   assert.equal(report.actions[0].planeTransition.to, 'origin');
   assert.equal(report.actions[0].planeTransition.action, 'sync');
+});
+
+test('runDevelopSync records draft remediation details from rewritten parity evidence when sync exits non-zero', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-remediation-report-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const parityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  await mkdir(path.dirname(parityReportPath), { recursive: true });
+  await writeFile(
+    parityReportPath,
+    JSON.stringify({
+      schema: 'origin-upstream-parity@v1',
+      status: 'ok',
+      tipDiff: { fileCount: 5 },
+      planeTransition: {
+        from: 'upstream',
+        to: 'origin',
+        action: 'sync',
+        via: 'priority:develop:sync'
+      },
+      syncResult: {
+        mode: 'pull-request-draft',
+        reason: 'diverged-fork-plane',
+        parityConverged: false,
+        parityRemediation: {
+          planeTransition: {
+            from: 'upstream',
+            to: 'origin',
+            action: 'sync',
+            via: 'priority:develop:sync'
+          },
+          syncMethod: 'pull-request-draft',
+          syncBranch: 'sync/origin-develop-parity',
+          pullRequest: {
+            number: 88,
+            url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/88'
+          }
+        }
+      }
+    }, null, 2),
+    'utf8'
+  );
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'origin',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            writeFileSyncImmediate(
+              parityReportPath,
+              JSON.stringify({
+                schema: 'origin-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 5 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'origin',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'pull-request-draft',
+                  reason: 'diverged-fork-plane',
+                  parityConverged: false,
+                  parityRemediation: {
+                    planeTransition: {
+                      from: 'upstream',
+                      to: 'origin',
+                      action: 'sync',
+                      via: 'priority:develop:sync'
+                    },
+                    syncMethod: 'pull-request-draft',
+                    syncBranch: 'sync/origin-develop-parity',
+                    pullRequest: {
+                      number: 88,
+                      url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/88'
+                    }
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 1, stdout: '', stderr: 'draft remediation staged' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /priority:develop:sync failed for origin/i
+  );
+
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.actions[0].status, 'failed');
+  assert.equal(report.actions[0].syncMode, 'pull-request-draft');
+  assert.equal(report.actions[0].syncReason, 'diverged-fork-plane');
+  assert.equal(report.actions[0].parityConverged, false);
+  assert.equal(report.actions[0].parityRemediation.pullRequest.number, 88);
+  assert.equal(report.actions[0].parityRemediation.syncBranch, 'sync/origin-develop-parity');
+  assert.equal(report.actions[0].planeTransition.to, 'origin');
+});
+
+test('runDevelopSync keeps aligned personal results when origin stages remediation in all-remote mode', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-remediation-all-remotes-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  initTempGitRepo(tempRoot);
+
+  const originParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const personalParityReportPath = path.join(tempRoot, 'tests', 'results', '_agent', 'issue', 'personal-upstream-parity.json');
+  await mkdir(path.dirname(originParityReportPath), { recursive: true });
+
+  const reportPath = path.join(tempRoot, 'develop-sync-report.json');
+  await assert.rejects(
+    async () =>
+      runDevelopSync({
+        repoRoot: tempRoot,
+        options: {
+          forkRemote: 'all',
+          reportPath
+        },
+        spawnSyncFn: (command, args, options = {}) => {
+          if (command === 'git') {
+            return spawnSync(command, args, {
+              ...options,
+              cwd: tempRoot,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe']
+            });
+          }
+          if (command === 'pwsh') {
+            const remote = args[args.indexOf('-HeadRemote') + 1];
+            if (remote === 'origin') {
+              writeFileSyncImmediate(
+                originParityReportPath,
+                JSON.stringify({
+                  schema: 'origin-upstream-parity@v1',
+                  status: 'ok',
+                  tipDiff: { fileCount: 5 },
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'origin',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  },
+                  syncResult: {
+                    mode: 'pull-request-draft',
+                    reason: 'diverged-fork-plane',
+                    parityConverged: false,
+                    parityRemediation: {
+                      planeTransition: {
+                        from: 'upstream',
+                        to: 'origin',
+                        action: 'sync',
+                        via: 'priority:develop:sync'
+                      },
+                      syncMethod: 'pull-request-draft',
+                      syncBranch: 'sync/origin-develop-parity',
+                      pullRequest: {
+                        number: 88,
+                        url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/88'
+                      }
+                    }
+                  }
+                }, null, 2),
+                'utf8'
+              );
+              return { status: 1, stdout: '', stderr: 'draft remediation staged' };
+            }
+            writeFileSyncImmediate(
+              personalParityReportPath,
+              JSON.stringify({
+                schema: 'personal-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'personal',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true,
+                  planeTransition: {
+                    from: 'upstream',
+                    to: 'personal',
+                    action: 'sync',
+                    via: 'priority:develop:sync'
+                  }
+                }
+              }, null, 2),
+              'utf8'
+            );
+            return { status: 0, stdout: '', stderr: '' };
+          }
+          throw new Error(`Unexpected command ${command}`);
+        }
+      }),
+    /priority:develop:sync failed for origin/i
+  );
+
+  const report = readJson(reportPath);
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(
+    report.actions.map((action) => [action.remote, action.status, action.syncMode]),
+    [
+      ['origin', 'failed', 'pull-request-draft'],
+      ['personal', 'ok', 'direct-push']
+    ]
+  );
+  assert.equal(report.actions[0].parityConverged, false);
+  assert.equal(report.actions[1].parityConverged, true);
 });
 
 test('runDevelopSync records fork-sync mode details from the parity report', async (t) => {
@@ -368,6 +1377,39 @@ test('runDevelopSync records fork-sync mode details from the parity report', asy
         });
       }
       if (command === 'pwsh') {
+        writeFileSyncImmediate(
+          parityReportPath,
+          JSON.stringify({
+            schema: 'origin-upstream-parity@v1',
+            status: 'ok',
+            tipDiff: { fileCount: 0 },
+            planeTransition: {
+              from: 'upstream',
+              to: 'origin',
+              action: 'sync',
+              via: 'priority:develop:sync'
+            },
+            syncResult: {
+              mode: 'fork-sync',
+              reason: 'protected-branch-gh013',
+              parityConverged: true,
+              protectedSync: {
+                planeTransition: {
+                  from: 'upstream',
+                  to: 'origin',
+                  action: 'sync',
+                  via: 'priority:develop:sync'
+                },
+                syncMethod: 'fork-sync',
+                mergeUpstream: {
+                  message: 'Branch synced',
+                  merge_type: 'fast-forward'
+                }
+              }
+            }
+          }, null, 2),
+          'utf8'
+        );
         return { status: 0, stdout: '', stderr: '' };
       }
       throw new Error(`Unexpected command ${command}`);
@@ -425,6 +1467,20 @@ test('runDevelopSync fails closed when the parity report omits plane transition 
             });
           }
           if (command === 'pwsh') {
+            writeFileSyncImmediate(
+              parityReportPath,
+              JSON.stringify({
+                schema: 'origin-upstream-parity@v1',
+                status: 'ok',
+                tipDiff: { fileCount: 0 },
+                syncResult: {
+                  mode: 'direct-push',
+                  reason: 'direct-push',
+                  parityConverged: true
+                }
+              }, null, 2),
+              'utf8'
+            );
             return { status: 0, stdout: '', stderr: '' };
           }
           throw new Error(`Unexpected command ${command}`);
@@ -798,14 +1854,15 @@ test('Sync-OriginUpstreamDevelop targeted refresh detects a newer remote head in
   assert.match(`${result.stdout}\n${result.stderr}`, /Remote tracking ref .* expected/);
 });
 
-test('Sync-OriginUpstreamDevelop treats active branch rules as a protected sync PR handoff before direct push', async (t) => {
-  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-protected-rules-'));
+test('Sync-OriginUpstreamDevelop fails closed on diverged fork develop without retrying direct push', async (t) => {
+  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-fork-'));
   const upstreamBare = path.join(sandboxRoot, 'upstream.git');
   const originBare = path.join(sandboxRoot, 'origin.git');
   const seedRepo = path.join(sandboxRoot, 'seed');
   const controlRepo = path.join(sandboxRoot, 'control');
+  const originUpdaterRepo = path.join(sandboxRoot, 'origin-updater');
+  const upstreamUpdaterRepo = path.join(sandboxRoot, 'upstream-updater');
   const worktreeRepo = path.join(sandboxRoot, 'worktree');
-  const updaterRepo = path.join(sandboxRoot, 'updater');
   t.after(async () => {
     await rm(sandboxRoot, { recursive: true, force: true });
   });
@@ -822,28 +1879,142 @@ test('Sync-OriginUpstreamDevelop treats active branch rules as a protected sync 
   run('git', ['push', 'upstream', 'develop'], { cwd: seedRepo });
   run('git', ['push', 'origin', 'develop'], { cwd: seedRepo });
 
-  run('git', ['clone', originBare, controlRepo], { cwd: sandboxRoot });
+  run('git', ['clone', originBare, originUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: originUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: originUpdaterRepo });
+  await writeFile(path.join(originUpdaterRepo, 'ORIGIN.txt'), 'origin-only\n', 'utf8');
+  run('git', ['add', 'ORIGIN.txt'], { cwd: originUpdaterRepo });
+  run('git', ['commit', '-m', 'origin diverges'], { cwd: originUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: originUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, upstreamUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: upstreamUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: upstreamUpdaterRepo });
+  await writeFile(path.join(upstreamUpdaterRepo, 'UPSTREAM.txt'), 'upstream-only\n', 'utf8');
+  run('git', ['add', 'UPSTREAM.txt'], { cwd: upstreamUpdaterRepo });
+  run('git', ['commit', '-m', 'upstream diverges'], { cwd: upstreamUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: upstreamUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, controlRepo], { cwd: sandboxRoot });
   run('git', ['config', 'user.email', 'agent@example.com'], { cwd: controlRepo });
   run('git', ['config', 'user.name', 'Agent Runner'], { cwd: controlRepo });
-  run('git', ['remote', 'add', 'upstream', upstreamBare], { cwd: controlRepo });
-  run('git', ['fetch', 'upstream'], { cwd: controlRepo });
-  run('git', ['worktree', 'add', '-b', 'issue/test-sync-protected-rules', worktreeRepo, 'develop'], { cwd: controlRepo });
+  run('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: controlRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: controlRepo });
+  run('git', ['fetch', 'origin'], { cwd: controlRepo });
+  run('git', ['worktree', 'add', '-b', 'issue/test-sync-diverged', worktreeRepo, 'develop'], { cwd: controlRepo });
   run('git', ['checkout', '--detach'], { cwd: controlRepo });
 
   await mkdir(path.join(worktreeRepo, 'tools', 'priority'), { recursive: true });
   await mkdir(path.join(worktreeRepo, 'tools', 'priority', 'lib'), { recursive: true });
   await mkdir(path.join(worktreeRepo, 'tools', 'policy'), { recursive: true });
-  const source = readFileSyncImmediate(path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'), 'utf8');
-  const protectedSource = source
-    .replace(
-      "$targetRepository = Resolve-RemoteRepositorySlug -Remote $HeadRemote",
-      "$targetRepository = 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork'"
-    )
-    .replace(
-      "$protectedSyncProbe = Get-ActiveProtectedSyncProbe -Repository $targetRepository -BranchName $Branch",
-      "$protectedSyncProbe = [ordered]@{ required = $true; ruleTypes = @('pull_request', 'merge_queue'); rulesetIds = @('13700055'); bypassModes = @('never'); bypassAllowsDirectPush = $false }"
-    );
-  await writeFile(path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'), protectedSource, 'utf8');
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+    path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'report-origin-upstream-parity.mjs')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'lib', 'branch-classification.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'lib', 'branch-classification.mjs')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'policy', 'branch-classes.json'),
+    path.join(worktreeRepo, 'tools', 'policy', 'branch-classes.json')
+  );
+
+  const parityReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const result = spawnSync(
+    'pwsh',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-File',
+      path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+      '-HeadRemote',
+      'origin',
+      '-ParityReportPath',
+      parityReportPath
+    ],
+    {
+      cwd: worktreeRepo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 180000
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Attempt 2\/3/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /diverged-fork-plane/);
+
+  const parityReport = JSON.parse(await readFile(parityReportPath, 'utf8'));
+  assert.equal(parityReport.syncResult.mode, 'direct-push');
+  assert.equal(parityReport.syncResult.reason, 'diverged-fork-plane');
+  assert.equal(parityReport.syncResult.parityConverged, false);
+  assert.equal(parityReport.recommendation.code, 'bidirectional-drift');
+  assert.equal(parityReport.commitDivergence.baseOnly > 0, true);
+  assert.equal(parityReport.commitDivergence.headOnly > 0, true);
+});
+
+test('Sync-OriginUpstreamDevelop stages origin parity remediation through a deterministic PR path', async (t) => {
+  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-remediation-'));
+  const upstreamBare = path.join(sandboxRoot, 'upstream.git');
+  const originBare = path.join(sandboxRoot, 'origin.git');
+  const seedRepo = path.join(sandboxRoot, 'seed');
+  const controlRepo = path.join(sandboxRoot, 'control');
+  const worktreeRepo = path.join(sandboxRoot, 'worktree');
+  const upstreamUpdaterRepo = path.join(sandboxRoot, 'upstream-updater');
+  const originUpdaterRepo = path.join(sandboxRoot, 'origin-updater');
+  t.after(async () => {
+    await rm(sandboxRoot, { recursive: true, force: true });
+  });
+
+  initBareRepo(upstreamBare);
+  initBareRepo(originBare);
+
+  initRepo(seedRepo);
+  await writeFile(path.join(seedRepo, 'README.md'), 'seed\n', 'utf8');
+  run('git', ['add', 'README.md'], { cwd: seedRepo });
+  run('git', ['commit', '-m', 'seed'], { cwd: seedRepo });
+  run('git', ['remote', 'add', 'upstream', upstreamBare], { cwd: seedRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: seedRepo });
+  run('git', ['push', 'upstream', 'develop'], { cwd: seedRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: seedRepo });
+
+  run('git', ['clone', originBare, originUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: originUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: originUpdaterRepo });
+  await writeFile(path.join(originUpdaterRepo, 'ORIGIN.txt'), 'origin-only\n', 'utf8');
+  run('git', ['add', 'ORIGIN.txt'], { cwd: originUpdaterRepo });
+  run('git', ['commit', '-m', 'origin diverges'], { cwd: originUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: originUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, upstreamUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: upstreamUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: upstreamUpdaterRepo });
+  await writeFile(path.join(upstreamUpdaterRepo, 'UPSTREAM.txt'), 'upstream-only\n', 'utf8');
+  run('git', ['add', 'UPSTREAM.txt'], { cwd: upstreamUpdaterRepo });
+  run('git', ['commit', '-m', 'upstream diverges'], { cwd: upstreamUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: upstreamUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, controlRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: controlRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: controlRepo });
+  run('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: controlRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: controlRepo });
+  run('git', ['fetch', 'origin'], { cwd: controlRepo });
+  run('git', ['worktree', 'add', '-b', 'issue/test-sync-remediation', worktreeRepo, 'develop'], { cwd: controlRepo });
+  run('git', ['checkout', '--detach'], { cwd: controlRepo });
+
+  await mkdir(path.join(worktreeRepo, 'tools', 'priority'), { recursive: true });
+  await mkdir(path.join(worktreeRepo, 'tools', 'priority', 'lib'), { recursive: true });
+  await mkdir(path.join(worktreeRepo, 'tools', 'policy'), { recursive: true });
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+    path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1')
+  );
   await copyFile(
     path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
     path.join(worktreeRepo, 'tools', 'priority', 'report-origin-upstream-parity.mjs')
@@ -857,24 +2028,23 @@ test('Sync-OriginUpstreamDevelop treats active branch rules as a protected sync 
     path.join(worktreeRepo, 'tools', 'policy', 'branch-classes.json')
   );
   await writeFile(
-    path.join(worktreeRepo, 'tools', 'priority', 'protected-develop-sync-pr.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'diverged-develop-remediation-pr.mjs'),
     `#!/usr/bin/env node
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 const args = process.argv.slice(2);
 const reportIndex = args.indexOf('--report-path');
-const reportPath = reportIndex >= 0 ? args[reportIndex + 1] : path.join(process.cwd(), 'tests/results/_agent/issue/protected-report.json');
-const syncIndex = args.indexOf('--sync-branch');
-const syncBranch = syncIndex >= 0 ? args[syncIndex + 1] : 'sync/origin-develop';
+const reportPath = reportIndex >= 0 ? args[reportIndex + 1] : path.join(process.cwd(), 'tests/results/_agent/issue/remediation.json');
 mkdirSync(path.dirname(reportPath), { recursive: true });
 writeFileSync(reportPath, JSON.stringify({
-  schema: 'priority/protected-develop-sync@v1',
-  generatedAt: '2026-03-12T00:00:00.000Z',
+  schema: 'priority/diverged-develop-remediation@v1',
+  generatedAt: '2026-03-16T00:00:00.000Z',
   targetRemote: 'origin',
   baseRemote: 'upstream',
   branch: 'develop',
-  syncBranch,
-  reason: 'protected-branch-rules',
+  syncBranch: 'sync/origin-develop-parity',
+  reason: 'diverged-fork-plane',
+  syncMethod: 'pull-request-draft',
   planeTransition: {
     from: 'upstream',
     to: 'origin',
@@ -882,29 +2052,24 @@ writeFileSync(reportPath, JSON.stringify({
     via: 'priority:develop:sync'
   },
   pullRequest: {
-    number: 56,
-    url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/56',
-    isDraft: false,
-    mergeStateStatus: 'BLOCKED',
-    reusedExisting: false
+    number: 77,
+    url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/77',
+    state: 'OPEN',
+    isDraft: true,
+    headRefName: 'sync/origin-develop-parity',
+    baseRefName: 'develop',
+    mergeStateStatus: 'BLOCKED'
   },
-  readyState: { status: 'marked-ready' },
-  mergeRequest: { status: 'requested' }
+  draftState: { status: 'already-draft' },
+  autoMerge: { status: 'already-disabled' },
+  promotionTarget: { syncMethod: 'pull-request-queue', mergeMethod: 'squash' }
 }, null, 2) + '\\n', 'utf8');
 `,
     'utf8'
   );
 
-  run('git', ['clone', upstreamBare, updaterRepo], { cwd: sandboxRoot });
-  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: updaterRepo });
-  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: updaterRepo });
-  await writeFile(path.join(updaterRepo, 'CHANGE.txt'), 'upstream advance\n', 'utf8');
-  run('git', ['add', 'CHANGE.txt'], { cwd: updaterRepo });
-  run('git', ['commit', '-m', 'advance upstream'], { cwd: updaterRepo });
-  run('git', ['push', 'origin', 'develop'], { cwd: updaterRepo });
-
   const parityReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
-  run(
+  const result = spawnSync(
     'pwsh',
     [
       '-NoLogo',
@@ -916,34 +2081,36 @@ writeFileSync(reportPath, JSON.stringify({
       '-ParityReportPath',
       parityReportPath
     ],
-    { cwd: worktreeRepo, timeout: 180000 }
+    {
+      cwd: worktreeRepo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 180000
+    }
   );
 
-  const upstreamHead = run('git', ['--git-dir', upstreamBare, 'rev-parse', 'develop'], { cwd: sandboxRoot });
-  const originDevelopHead = run('git', ['--git-dir', originBare, 'rev-parse', 'develop'], { cwd: sandboxRoot });
-  const syncBranchHead = run('git', ['--git-dir', originBare, 'rev-parse', 'refs/heads/sync/origin-develop'], { cwd: sandboxRoot });
-  assert.notEqual(originDevelopHead, upstreamHead);
-  assert.equal(syncBranchHead, upstreamHead);
-
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Attempt 2\/3/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /pull-request-draft-remediation/);
   const parityReport = JSON.parse(await readFile(parityReportPath, 'utf8'));
-  assert.equal(parityReport.planeTransition.from, 'upstream');
-  assert.equal(parityReport.planeTransition.to, 'origin');
-  assert.equal(parityReport.syncResult.mode, 'protected-pr');
-  assert.equal(parityReport.syncResult.reason, 'protected-branch-rules');
+  assert.equal(parityReport.syncResult.mode, 'pull-request-draft');
+  assert.equal(parityReport.syncResult.reason, 'diverged-fork-plane');
   assert.equal(parityReport.syncResult.parityConverged, false);
-  assert.equal(parityReport.syncResult.planeTransition.to, 'origin');
-  assert.equal(parityReport.syncResult.protectedSync.pullRequest.number, 56);
+  assert.equal(parityReport.syncResult.parityRemediation.pullRequest.number, 77);
+  assert.equal(parityReport.syncResult.reportPath.endsWith('origin-diverged-develop-remediation.json'), true);
+  assert.equal(parityReport.recommendation.code, 'bidirectional-drift');
   assert.equal(parityReport.tipDiff.fileCount > 0, true);
 });
 
-test('Sync-OriginUpstreamDevelop keeps direct-push mode when active rules are bypassable by the current actor', async (t) => {
-  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-protected-bypass-'));
+test('Sync-OriginUpstreamDevelop downgrades converged-after-race remediation to remote-already-converged', async (t) => {
+  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-remediation-race-'));
   const upstreamBare = path.join(sandboxRoot, 'upstream.git');
   const originBare = path.join(sandboxRoot, 'origin.git');
   const seedRepo = path.join(sandboxRoot, 'seed');
   const controlRepo = path.join(sandboxRoot, 'control');
   const worktreeRepo = path.join(sandboxRoot, 'worktree');
-  const updaterRepo = path.join(sandboxRoot, 'updater');
+  const upstreamUpdaterRepo = path.join(sandboxRoot, 'upstream-updater');
+  const originUpdaterRepo = path.join(sandboxRoot, 'origin-updater');
   t.after(async () => {
     await rm(sandboxRoot, { recursive: true, force: true });
   });
@@ -960,28 +2127,38 @@ test('Sync-OriginUpstreamDevelop keeps direct-push mode when active rules are by
   run('git', ['push', 'upstream', 'develop'], { cwd: seedRepo });
   run('git', ['push', 'origin', 'develop'], { cwd: seedRepo });
 
-  run('git', ['clone', originBare, controlRepo], { cwd: sandboxRoot });
+  run('git', ['clone', originBare, originUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: originUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: originUpdaterRepo });
+  await writeFile(path.join(originUpdaterRepo, 'ORIGIN.txt'), 'origin-only\n', 'utf8');
+  run('git', ['add', 'ORIGIN.txt'], { cwd: originUpdaterRepo });
+  run('git', ['commit', '-m', 'origin diverges'], { cwd: originUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: originUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, upstreamUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: upstreamUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: upstreamUpdaterRepo });
+  await writeFile(path.join(upstreamUpdaterRepo, 'UPSTREAM.txt'), 'upstream-only\n', 'utf8');
+  run('git', ['add', 'UPSTREAM.txt'], { cwd: upstreamUpdaterRepo });
+  run('git', ['commit', '-m', 'upstream diverges'], { cwd: upstreamUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: upstreamUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, controlRepo], { cwd: sandboxRoot });
   run('git', ['config', 'user.email', 'agent@example.com'], { cwd: controlRepo });
   run('git', ['config', 'user.name', 'Agent Runner'], { cwd: controlRepo });
-  run('git', ['remote', 'add', 'upstream', upstreamBare], { cwd: controlRepo });
-  run('git', ['fetch', 'upstream'], { cwd: controlRepo });
-  run('git', ['worktree', 'add', '-b', 'issue/test-sync-protected-bypass', worktreeRepo, 'develop'], { cwd: controlRepo });
+  run('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: controlRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: controlRepo });
+  run('git', ['fetch', 'origin'], { cwd: controlRepo });
+  run('git', ['worktree', 'add', '-b', 'issue/test-sync-remediation-race', worktreeRepo, 'develop'], { cwd: controlRepo });
   run('git', ['checkout', '--detach'], { cwd: controlRepo });
 
   await mkdir(path.join(worktreeRepo, 'tools', 'priority'), { recursive: true });
   await mkdir(path.join(worktreeRepo, 'tools', 'priority', 'lib'), { recursive: true });
   await mkdir(path.join(worktreeRepo, 'tools', 'policy'), { recursive: true });
-  const source = readFileSyncImmediate(path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'), 'utf8');
-  const bypassSource = source
-    .replace(
-      "$targetRepository = Resolve-RemoteRepositorySlug -Remote $HeadRemote",
-      "$targetRepository = 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork'"
-    )
-    .replace(
-      "$protectedSyncProbe = Get-ActiveProtectedSyncProbe -Repository $targetRepository -BranchName $Branch",
-      "$protectedSyncProbe = [ordered]@{ required = $false; ruleTypes = @('pull_request', 'merge_queue'); rulesetIds = @('13700055'); bypassModes = @('always'); bypassAllowsDirectPush = $true }"
-    );
-  await writeFile(path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'), bypassSource, 'utf8');
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+    path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1')
+  );
   await copyFile(
     path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
     path.join(worktreeRepo, 'tools', 'priority', 'report-origin-upstream-parity.mjs')
@@ -994,14 +2171,20 @@ test('Sync-OriginUpstreamDevelop keeps direct-push mode when active rules are by
     path.join(repoRoot, 'tools', 'policy', 'branch-classes.json'),
     path.join(worktreeRepo, 'tools', 'policy', 'branch-classes.json')
   );
-
-  run('git', ['clone', upstreamBare, updaterRepo], { cwd: sandboxRoot });
-  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: updaterRepo });
-  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: updaterRepo });
-  await writeFile(path.join(updaterRepo, 'CHANGE.txt'), 'upstream advance\n', 'utf8');
-  run('git', ['add', 'CHANGE.txt'], { cwd: updaterRepo });
-  run('git', ['commit', '-m', 'advance upstream'], { cwd: updaterRepo });
-  run('git', ['push', 'origin', 'develop'], { cwd: updaterRepo });
+  await writeFile(
+    path.join(worktreeRepo, 'tools', 'priority', 'diverged-develop-remediation-pr.mjs'),
+    `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+spawnSync('git', ['push', '--force', 'origin', 'upstream/develop:develop'], {
+  cwd: process.cwd(),
+  encoding: 'utf8',
+  stdio: ['ignore', 'ignore', 'ignore']
+});
+console.error('Tree parity already holds between upstream/develop and origin/develop; remediation staging is unnecessary.');
+process.exit(1);
+`,
+    'utf8'
+  );
 
   const parityReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
   run(
@@ -1019,25 +2202,23 @@ test('Sync-OriginUpstreamDevelop keeps direct-push mode when active rules are by
     { cwd: worktreeRepo, timeout: 180000 }
   );
 
-  const upstreamHead = run('git', ['--git-dir', upstreamBare, 'rev-parse', 'develop'], { cwd: sandboxRoot });
-  const originDevelopHead = run('git', ['--git-dir', originBare, 'rev-parse', 'develop'], { cwd: sandboxRoot });
-  assert.equal(originDevelopHead, upstreamHead);
-
   const parityReport = JSON.parse(await readFile(parityReportPath, 'utf8'));
   assert.equal(parityReport.syncResult.mode, 'direct-push');
-  assert.equal(parityReport.syncResult.reason, 'direct-push');
+  assert.equal(parityReport.syncResult.reason, 'remote-already-converged');
   assert.equal(parityReport.syncResult.parityConverged, true);
+  assert.equal(Object.hasOwn(parityReport.syncResult, 'reportPath'), false);
   assert.equal(parityReport.tipDiff.fileCount, 0);
 });
 
-test('Sync-OriginUpstreamDevelop keeps direct-push mode when bypass authority is unknown', async (t) => {
-  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-protected-unknown-'));
+test('Sync-OriginUpstreamDevelop reuses a persisted draft-safe remediation report when helper post-processing fails', async (t) => {
+  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-remediation-partial-'));
   const upstreamBare = path.join(sandboxRoot, 'upstream.git');
   const originBare = path.join(sandboxRoot, 'origin.git');
   const seedRepo = path.join(sandboxRoot, 'seed');
   const controlRepo = path.join(sandboxRoot, 'control');
   const worktreeRepo = path.join(sandboxRoot, 'worktree');
-  const updaterRepo = path.join(sandboxRoot, 'updater');
+  const upstreamUpdaterRepo = path.join(sandboxRoot, 'upstream-updater');
+  const originUpdaterRepo = path.join(sandboxRoot, 'origin-updater');
   t.after(async () => {
     await rm(sandboxRoot, { recursive: true, force: true });
   });
@@ -1054,28 +2235,38 @@ test('Sync-OriginUpstreamDevelop keeps direct-push mode when bypass authority is
   run('git', ['push', 'upstream', 'develop'], { cwd: seedRepo });
   run('git', ['push', 'origin', 'develop'], { cwd: seedRepo });
 
-  run('git', ['clone', originBare, controlRepo], { cwd: sandboxRoot });
+  run('git', ['clone', originBare, originUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: originUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: originUpdaterRepo });
+  await writeFile(path.join(originUpdaterRepo, 'ORIGIN.txt'), 'origin-only\n', 'utf8');
+  run('git', ['add', 'ORIGIN.txt'], { cwd: originUpdaterRepo });
+  run('git', ['commit', '-m', 'origin diverges'], { cwd: originUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: originUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, upstreamUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: upstreamUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: upstreamUpdaterRepo });
+  await writeFile(path.join(upstreamUpdaterRepo, 'UPSTREAM.txt'), 'upstream-only\n', 'utf8');
+  run('git', ['add', 'UPSTREAM.txt'], { cwd: upstreamUpdaterRepo });
+  run('git', ['commit', '-m', 'upstream diverges'], { cwd: upstreamUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: upstreamUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, controlRepo], { cwd: sandboxRoot });
   run('git', ['config', 'user.email', 'agent@example.com'], { cwd: controlRepo });
   run('git', ['config', 'user.name', 'Agent Runner'], { cwd: controlRepo });
-  run('git', ['remote', 'add', 'upstream', upstreamBare], { cwd: controlRepo });
-  run('git', ['fetch', 'upstream'], { cwd: controlRepo });
-  run('git', ['worktree', 'add', '-b', 'issue/test-sync-protected-unknown', worktreeRepo, 'develop'], { cwd: controlRepo });
+  run('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: controlRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: controlRepo });
+  run('git', ['fetch', 'origin'], { cwd: controlRepo });
+  run('git', ['worktree', 'add', '-b', 'issue/test-sync-remediation-partial', worktreeRepo, 'develop'], { cwd: controlRepo });
   run('git', ['checkout', '--detach'], { cwd: controlRepo });
 
   await mkdir(path.join(worktreeRepo, 'tools', 'priority'), { recursive: true });
   await mkdir(path.join(worktreeRepo, 'tools', 'priority', 'lib'), { recursive: true });
   await mkdir(path.join(worktreeRepo, 'tools', 'policy'), { recursive: true });
-  const source = readFileSyncImmediate(path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'), 'utf8');
-  const unknownSource = source
-    .replace(
-      "$targetRepository = Resolve-RemoteRepositorySlug -Remote $HeadRemote",
-      "$targetRepository = 'LabVIEW-Community-CI-CD/compare-vi-cli-action-fork'"
-    )
-    .replace(
-      "$protectedSyncProbe = Get-ActiveProtectedSyncProbe -Repository $targetRepository -BranchName $Branch",
-      "$protectedSyncProbe = [ordered]@{ required = $false; ruleTypes = @('pull_request', 'merge_queue'); rulesetIds = @('13700055'); bypassModes = @('unknown'); bypassAllowsDirectPush = $false }"
-    );
-  await writeFile(path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'), unknownSource, 'utf8');
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+    path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1')
+  );
   await copyFile(
     path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
     path.join(worktreeRepo, 'tools', 'priority', 'report-origin-upstream-parity.mjs')
@@ -1088,17 +2279,57 @@ test('Sync-OriginUpstreamDevelop keeps direct-push mode when bypass authority is
     path.join(repoRoot, 'tools', 'policy', 'branch-classes.json'),
     path.join(worktreeRepo, 'tools', 'policy', 'branch-classes.json')
   );
-
-  run('git', ['clone', upstreamBare, updaterRepo], { cwd: sandboxRoot });
-  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: updaterRepo });
-  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: updaterRepo });
-  await writeFile(path.join(updaterRepo, 'CHANGE.txt'), 'upstream advance\n', 'utf8');
-  run('git', ['add', 'CHANGE.txt'], { cwd: updaterRepo });
-  run('git', ['commit', '-m', 'advance upstream'], { cwd: updaterRepo });
-  run('git', ['push', 'origin', 'develop'], { cwd: updaterRepo });
+  await writeFile(
+    path.join(worktreeRepo, 'tools', 'priority', 'diverged-develop-remediation-pr.mjs'),
+    `#!/usr/bin/env node
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+const reportIndex = args.indexOf('--report-path');
+const reportPath = reportIndex >= 0 ? args[reportIndex + 1] : path.join(process.cwd(), 'tests/results/_agent/issue/remediation.json');
+mkdirSync(path.dirname(reportPath), { recursive: true });
+writeFileSync(reportPath, JSON.stringify({
+  schema: 'priority/diverged-develop-remediation@v1',
+  generatedAt: '2026-03-16T00:00:00.000Z',
+  targetRemote: 'origin',
+  baseRemote: 'upstream',
+  branch: 'develop',
+  syncBranch: 'sync/origin-develop-parity',
+  reason: 'diverged-fork-plane',
+  syncMethod: 'pull-request-draft',
+  planeTransition: {
+    from: 'upstream',
+    to: 'origin',
+    action: 'sync',
+    via: 'priority:develop:sync'
+  },
+  pullRequest: {
+    number: 78,
+    url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/78',
+    state: 'OPEN',
+    isDraft: true,
+    headRefName: 'sync/origin-develop-parity',
+    baseRefName: 'develop',
+    mergeStateStatus: 'BLOCKED',
+    reusedExisting: false
+  },
+  draftState: {
+    status: 'already-draft',
+    attempted: false
+  },
+  autoMerge: {
+    status: 'already-disabled',
+    attempted: false
+  }
+}, null, 2) + '\\n', 'utf8');
+console.error('draft PR exists but metadata refresh failed');
+process.exit(1);
+`,
+    'utf8'
+  );
 
   const parityReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
-  run(
+  const result = spawnSync(
     'pwsh',
     [
       '-NoLogo',
@@ -1110,18 +2341,312 @@ test('Sync-OriginUpstreamDevelop keeps direct-push mode when bypass authority is
       '-ParityReportPath',
       parityReportPath
     ],
-    { cwd: worktreeRepo, timeout: 180000 }
+    {
+      cwd: worktreeRepo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 180000
+    }
   );
 
-  const upstreamHead = run('git', ['--git-dir', upstreamBare, 'rev-parse', 'develop'], { cwd: sandboxRoot });
-  const originDevelopHead = run('git', ['--git-dir', originBare, 'rev-parse', 'develop'], { cwd: sandboxRoot });
-  assert.equal(originDevelopHead, upstreamHead);
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Attempt 2\/3/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /pull-request-draft-remediation/);
+  const parityReport = JSON.parse(await readFile(parityReportPath, 'utf8'));
+  assert.equal(parityReport.syncResult.mode, 'pull-request-draft');
+  assert.equal(parityReport.syncResult.reason, 'diverged-fork-plane');
+  assert.equal(parityReport.syncResult.parityConverged, false);
+  assert.equal(parityReport.syncResult.parityRemediation.pullRequest.number, 78);
+  assert.equal(parityReport.syncResult.reportPath.endsWith('origin-diverged-develop-remediation.json'), true);
+  assert.equal(parityReport.tipDiff.fileCount > 0, true);
+});
 
+test('Sync-OriginUpstreamDevelop fails closed when origin remediation staging cannot be prepared', async (t) => {
+  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-remediation-fail-'));
+  const upstreamBare = path.join(sandboxRoot, 'upstream.git');
+  const originBare = path.join(sandboxRoot, 'origin.git');
+  const seedRepo = path.join(sandboxRoot, 'seed');
+  const controlRepo = path.join(sandboxRoot, 'control');
+  const worktreeRepo = path.join(sandboxRoot, 'worktree');
+  const upstreamUpdaterRepo = path.join(sandboxRoot, 'upstream-updater');
+  const originUpdaterRepo = path.join(sandboxRoot, 'origin-updater');
+  t.after(async () => {
+    await rm(sandboxRoot, { recursive: true, force: true });
+  });
+
+  initBareRepo(upstreamBare);
+  initBareRepo(originBare);
+
+  initRepo(seedRepo);
+  await writeFile(path.join(seedRepo, 'README.md'), 'seed\n', 'utf8');
+  run('git', ['add', 'README.md'], { cwd: seedRepo });
+  run('git', ['commit', '-m', 'seed'], { cwd: seedRepo });
+  run('git', ['remote', 'add', 'upstream', upstreamBare], { cwd: seedRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: seedRepo });
+  run('git', ['push', 'upstream', 'develop'], { cwd: seedRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: seedRepo });
+
+  run('git', ['clone', originBare, originUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: originUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: originUpdaterRepo });
+  await writeFile(path.join(originUpdaterRepo, 'ORIGIN.txt'), 'origin-only\n', 'utf8');
+  run('git', ['add', 'ORIGIN.txt'], { cwd: originUpdaterRepo });
+  run('git', ['commit', '-m', 'origin diverges'], { cwd: originUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: originUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, upstreamUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: upstreamUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: upstreamUpdaterRepo });
+  await writeFile(path.join(upstreamUpdaterRepo, 'UPSTREAM.txt'), 'upstream-only\n', 'utf8');
+  run('git', ['add', 'UPSTREAM.txt'], { cwd: upstreamUpdaterRepo });
+  run('git', ['commit', '-m', 'upstream diverges'], { cwd: upstreamUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: upstreamUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, controlRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: controlRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: controlRepo });
+  run('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: controlRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: controlRepo });
+  run('git', ['fetch', 'origin'], { cwd: controlRepo });
+  run('git', ['worktree', 'add', '-b', 'issue/test-sync-remediation-fail', worktreeRepo, 'develop'], { cwd: controlRepo });
+  run('git', ['checkout', '--detach'], { cwd: controlRepo });
+
+  await mkdir(path.join(worktreeRepo, 'tools', 'priority'), { recursive: true });
+  await mkdir(path.join(worktreeRepo, 'tools', 'priority', 'lib'), { recursive: true });
+  await mkdir(path.join(worktreeRepo, 'tools', 'policy'), { recursive: true });
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+    path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'report-origin-upstream-parity.mjs')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'lib', 'branch-classification.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'lib', 'branch-classification.mjs')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'policy', 'branch-classes.json'),
+    path.join(worktreeRepo, 'tools', 'policy', 'branch-classes.json')
+  );
+  await writeFile(
+    path.join(worktreeRepo, 'tools', 'priority', 'diverged-develop-remediation-pr.mjs'),
+    `#!/usr/bin/env node
+console.error('remediation staging failed');
+process.exit(1);
+`,
+    'utf8'
+  );
+
+  const parityReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const staleRemediationReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-diverged-develop-remediation.json');
+  await mkdir(path.dirname(staleRemediationReportPath), { recursive: true });
+  await writeFile(
+    staleRemediationReportPath,
+    JSON.stringify({
+      schema: 'priority/diverged-develop-remediation@v1',
+      generatedAt: '2026-03-15T00:00:00.000Z',
+      targetRemote: 'origin',
+      baseRemote: 'upstream',
+      branch: 'develop',
+      syncBranch: 'sync/origin-develop-parity',
+      reason: 'diverged-fork-plane',
+      syncMethod: 'pull-request-draft',
+      pullRequest: {
+        number: 999,
+        url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/999',
+        state: 'OPEN',
+        isDraft: true,
+        headRefName: 'sync/origin-develop-parity',
+        baseRefName: 'develop',
+        mergeStateStatus: 'BLOCKED',
+        reusedExisting: true
+      },
+      draftState: {
+        status: 'already-draft',
+        attempted: false
+      },
+      autoMerge: {
+        status: 'already-disabled',
+        attempted: false
+      }
+    }, null, 2),
+    'utf8'
+  );
+  const result = spawnSync(
+    'pwsh',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-File',
+      path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+      '-HeadRemote',
+      'origin',
+      '-ParityReportPath',
+      parityReportPath
+    ],
+    {
+      cwd: worktreeRepo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 180000
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Attempt 2\/3/);
+  assert.match(`${result.stdout}\n${result.stderr}`, /diverged-fork-plane-remediation/);
+  assert.equal(existsSync(staleRemediationReportPath), false);
   const parityReport = JSON.parse(await readFile(parityReportPath, 'utf8'));
   assert.equal(parityReport.syncResult.mode, 'direct-push');
-  assert.equal(parityReport.syncResult.reason, 'direct-push');
-  assert.equal(parityReport.syncResult.parityConverged, true);
-  assert.equal(parityReport.tipDiff.fileCount, 0);
+  assert.equal(parityReport.syncResult.reason, 'diverged-fork-plane');
+  assert.equal(parityReport.syncResult.parityConverged, false);
+});
+
+test('Sync-OriginUpstreamDevelop fails closed when a successful remediation report is not draft-safe', async (t) => {
+  const sandboxRoot = await mkdtemp(path.join(os.tmpdir(), 'develop-sync-diverged-remediation-unsafe-'));
+  const upstreamBare = path.join(sandboxRoot, 'upstream.git');
+  const originBare = path.join(sandboxRoot, 'origin.git');
+  const seedRepo = path.join(sandboxRoot, 'seed');
+  const controlRepo = path.join(sandboxRoot, 'control');
+  const worktreeRepo = path.join(sandboxRoot, 'worktree');
+  const upstreamUpdaterRepo = path.join(sandboxRoot, 'upstream-updater');
+  const originUpdaterRepo = path.join(sandboxRoot, 'origin-updater');
+  t.after(async () => {
+    await rm(sandboxRoot, { recursive: true, force: true });
+  });
+
+  initBareRepo(upstreamBare);
+  initBareRepo(originBare);
+
+  initRepo(seedRepo);
+  await writeFile(path.join(seedRepo, 'README.md'), 'seed\n', 'utf8');
+  run('git', ['add', 'README.md'], { cwd: seedRepo });
+  run('git', ['commit', '-m', 'seed'], { cwd: seedRepo });
+  run('git', ['remote', 'add', 'upstream', upstreamBare], { cwd: seedRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: seedRepo });
+  run('git', ['push', 'upstream', 'develop'], { cwd: seedRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: seedRepo });
+
+  run('git', ['clone', originBare, originUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: originUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: originUpdaterRepo });
+  await writeFile(path.join(originUpdaterRepo, 'ORIGIN.txt'), 'origin-only\n', 'utf8');
+  run('git', ['add', 'ORIGIN.txt'], { cwd: originUpdaterRepo });
+  run('git', ['commit', '-m', 'origin diverges'], { cwd: originUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: originUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, upstreamUpdaterRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: upstreamUpdaterRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: upstreamUpdaterRepo });
+  await writeFile(path.join(upstreamUpdaterRepo, 'UPSTREAM.txt'), 'upstream-only\n', 'utf8');
+  run('git', ['add', 'UPSTREAM.txt'], { cwd: upstreamUpdaterRepo });
+  run('git', ['commit', '-m', 'upstream diverges'], { cwd: upstreamUpdaterRepo });
+  run('git', ['push', 'origin', 'develop'], { cwd: upstreamUpdaterRepo });
+
+  run('git', ['clone', upstreamBare, controlRepo], { cwd: sandboxRoot });
+  run('git', ['config', 'user.email', 'agent@example.com'], { cwd: controlRepo });
+  run('git', ['config', 'user.name', 'Agent Runner'], { cwd: controlRepo });
+  run('git', ['remote', 'rename', 'origin', 'upstream'], { cwd: controlRepo });
+  run('git', ['remote', 'add', 'origin', originBare], { cwd: controlRepo });
+  run('git', ['fetch', 'origin'], { cwd: controlRepo });
+  run('git', ['worktree', 'add', '-b', 'issue/test-sync-remediation-unsafe', worktreeRepo, 'develop'], { cwd: controlRepo });
+  run('git', ['checkout', '--detach'], { cwd: controlRepo });
+
+  await mkdir(path.join(worktreeRepo, 'tools', 'priority'), { recursive: true });
+  await mkdir(path.join(worktreeRepo, 'tools', 'priority', 'lib'), { recursive: true });
+  await mkdir(path.join(worktreeRepo, 'tools', 'policy'), { recursive: true });
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+    path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'report-origin-upstream-parity.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'report-origin-upstream-parity.mjs')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'priority', 'lib', 'branch-classification.mjs'),
+    path.join(worktreeRepo, 'tools', 'priority', 'lib', 'branch-classification.mjs')
+  );
+  await copyFile(
+    path.join(repoRoot, 'tools', 'policy', 'branch-classes.json'),
+    path.join(worktreeRepo, 'tools', 'policy', 'branch-classes.json')
+  );
+  await writeFile(
+    path.join(worktreeRepo, 'tools', 'priority', 'diverged-develop-remediation-pr.mjs'),
+    `#!/usr/bin/env node
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+const reportIndex = args.indexOf('--report-path');
+const reportPath = reportIndex >= 0 ? args[reportIndex + 1] : path.join(process.cwd(), 'tests/results/_agent/issue/remediation.json');
+mkdirSync(path.dirname(reportPath), { recursive: true });
+writeFileSync(reportPath, JSON.stringify({
+  schema: 'priority/diverged-develop-remediation@v1',
+  generatedAt: '2026-03-16T00:00:00.000Z',
+  targetRemote: 'origin',
+  baseRemote: 'upstream',
+  branch: 'develop',
+  syncBranch: 'sync/origin-develop-parity',
+  reason: 'diverged-fork-plane',
+  syncMethod: 'pull-request-draft',
+  planeTransition: {
+    from: 'upstream',
+    to: 'origin',
+    action: 'sync',
+    via: 'priority:develop:sync'
+  },
+  pullRequest: {
+    number: 79,
+    url: 'https://github.com/LabVIEW-Community-CI-CD/compare-vi-cli-action-fork/pull/79',
+    state: 'OPEN',
+    isDraft: false,
+    headRefName: 'sync/origin-develop-parity',
+    baseRefName: 'develop',
+    mergeStateStatus: 'BLOCKED',
+    reusedExisting: false
+  },
+  draftState: {
+    status: 'already-draft',
+    attempted: false
+  },
+  autoMerge: {
+    status: 'already-disabled',
+    attempted: false
+  }
+}, null, 2) + '\\n', 'utf8');
+`,
+    'utf8'
+  );
+
+  const parityReportPath = path.join(worktreeRepo, 'tests', 'results', '_agent', 'issue', 'origin-upstream-parity.json');
+  const result = spawnSync(
+    'pwsh',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-File',
+      path.join(worktreeRepo, 'tools', 'priority', 'Sync-OriginUpstreamDevelop.ps1'),
+      '-HeadRemote',
+      'origin',
+      '-ParityReportPath',
+      parityReportPath
+    ],
+    {
+      cwd: worktreeRepo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 180000
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /not draft-safe/);
+  const parityReport = JSON.parse(await readFile(parityReportPath, 'utf8'));
+  assert.equal(parityReport.syncResult.mode, 'direct-push');
+  assert.equal(parityReport.syncResult.reason, 'diverged-fork-plane');
+  assert.equal(parityReport.syncResult.parityConverged, false);
 });
 
 test('Sync-OriginUpstreamDevelop treats GH013 as a protected sync PR handoff instead of failing', async (t) => {
@@ -1209,8 +2734,9 @@ writeFileSync(reportPath, JSON.stringify({
     mergeStateStatus: 'BLOCKED',
     reusedExisting: false
   },
-  readyState: { status: 'marked-ready' },
-  mergeRequest: { status: 'requested' }
+  draftState: { status: 'already-draft' },
+  autoMerge: { status: 'already-disabled' },
+  promotionTarget: { syncMethod: 'pull-request-queue', mergeMethod: 'squash' }
 }, null, 2) + '\\n', 'utf8');
 `,
     'utf8'
