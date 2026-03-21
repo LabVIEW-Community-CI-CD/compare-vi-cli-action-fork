@@ -72,6 +72,11 @@ looks stale:
 - When behavior and docs disagree, prefer the contract tests below before
   changing runtime code.
 
+### Support-slice registers
+
+- [Daemon Debt Register](./Daemon-Debt-Register.md)
+- [Daemon Capability Expansion Register](./Daemon-Capability-Expansion-Register.md)
+
 ## Authoritative Tests
 
 These tests are the fastest way to confirm the daemon contract without opening a

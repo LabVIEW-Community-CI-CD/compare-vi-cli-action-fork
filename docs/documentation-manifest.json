@@ -70,6 +70,8 @@
         "docs/knowledgebase/PrintToSingleFileHtml-Provenance.md",
         "docs/knowledgebase/Offline-RealHistory-Corpus.md",
         "docs/knowledgebase/Unattended-Delivery-Daemon-Surfaces.md",
+        "docs/knowledgebase/Daemon-Debt-Register.md",
+        "docs/knowledgebase/Daemon-Capability-Expansion-Register.md",
         "docs/DOWNSTREAM_DEVELOP_PROMOTION_CONTRACT.md",
         "docs/knowledgebase/DOCKER_TOOLS_PARITY.md",
         "docs/LABVIEW_GATING.md",
