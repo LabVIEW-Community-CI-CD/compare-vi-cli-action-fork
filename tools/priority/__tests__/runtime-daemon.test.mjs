@@ -348,7 +348,7 @@ test('comparevi worker checkout allocator refreshes and reuses an existing lane 
         if (args[0] === 'status' && args[1] === '--porcelain' && args[2] === '--untracked-files=all') {
           return { stdout: '', stderr: '' };
         }
-        if (args[0] === 'fetch' && args[1] === 'upstream' && args[2] === '--prune') {
+        if (args[0] === 'fetch' && args[2] === '--prune') {
           return { stdout: '', stderr: '' };
         }
         if (args[0] === 'checkout' && args[1] === '--force' && args[2] === '--detach' && args[3] === 'upstream/develop') {
