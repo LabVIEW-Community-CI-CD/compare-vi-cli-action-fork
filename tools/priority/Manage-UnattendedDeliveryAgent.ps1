@@ -42,6 +42,63 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $distScript = Join-Path $repoRoot 'dist\tools\priority\delivery-agent.js'
 Initialize-DeliveryAgentDistScript -RepoRoot $repoRoot -DistScript $distScript -WrapperLabel 'delivery-agent wrapper'
 
+function Get-ManagerStatusSummary {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Report
+  )
+
+  $hostSignal = $Report.hostSignal
+  $hostIsolation = $Report.hostIsolation
+  $hostSignalStatus = if ($hostSignal -and $hostSignal.status) { [string]$hostSignal.status } else { $null }
+  $hostSignalProvider = if ($hostSignal -and $hostSignal.provider) { [string]$hostSignal.provider } else { $null }
+
+  $activeRunnerServices = @()
+  if ($hostSignal -and $hostSignal.runnerServices -and $hostSignal.runnerServices.running) {
+    $activeRunnerServices = @($hostSignal.runnerServices.running) | Where-Object { $_ -and $_ -like 'actions.runner.*' }
+  }
+
+  $summaryStatus = 'unknown'
+  $summaryText = 'cutover readiness unknown: host signal is missing'
+
+  if ($hostSignal) {
+    if ($activeRunnerServices.Count -gt 0) {
+      $summaryStatus = 'runner-conflict'
+      $summaryText = "runner conflict: $($activeRunnerServices.Count) actions.runner.* services still active"
+      if ($hostSignalStatus -eq 'desktop-backed' -or $hostSignalProvider -eq 'desktop') {
+        $summaryText += '; cutover required: host still desktop-backed'
+      }
+    } elseif ($hostSignalStatus -eq 'native-wsl' -or $hostSignalProvider -eq 'native-wsl') {
+      $summaryStatus = 'ready'
+      $summaryText = 'cutover ready: native-wsl host signal is clear and no runner-service conflict remains'
+    } elseif ($hostSignalStatus -eq 'desktop-backed' -or $hostSignalProvider -eq 'desktop') {
+      $summaryStatus = 'cutover-required'
+      $summaryText = 'cutover required: host still desktop-backed'
+    } else {
+      $summaryStatus = 'cutover-required'
+      $summaryText = "cutover required: host signal status=$hostSignalStatus provider=$hostSignalProvider"
+    }
+  }
+
+  return [ordered]@{
+    hostSignal = [ordered]@{
+      status = $hostSignalStatus
+      provider = $hostSignalProvider
+    }
+    hostIsolation = [ordered]@{
+      lastEvent = $hostIsolation.lastEvent
+    }
+    runnerServices = [ordered]@{
+      activeCount = @($activeRunnerServices).Count
+      activeNames = @($activeRunnerServices)
+    }
+    cutoverReadiness = [ordered]@{
+      status = $summaryStatus
+      summary = $summaryText
+    }
+  }
+}
+
 $command = if ($Ensure) { 'ensure' } elseif ($Stop) { 'stop' } elseif ($Status) { 'status' } else { throw 'Specify one of -Ensure, -Status, or -Stop.' }
 $args = @(
   $distScript,
@@ -82,6 +139,19 @@ foreach ($flag in @(
   if ($flag.Enabled) {
     $args += $flag.Name
   }
+}
+
+if ($Status) {
+  $stdout = & node @args
+  $exitCode = $LASTEXITCODE
+  if ($exitCode -ne 0) {
+    exit $exitCode
+  }
+
+  $report = [string]::Join("`n", @($stdout)) | ConvertFrom-Json -Depth 64
+  $report | Add-Member -NotePropertyName managerStatusSummary -NotePropertyValue (Get-ManagerStatusSummary -Report $report) -Force
+  $report | ConvertTo-Json -Depth 64
+  exit 0
 }
 
 & node @args
