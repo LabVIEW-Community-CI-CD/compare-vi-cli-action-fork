@@ -480,6 +480,93 @@ test('comparevi worker checkout allocator repairs concurrent upstream fetch race
   );
 });
 
+test('comparevi worker checkout allocator falls back to origin/develop when upstream is unavailable', async (t) => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'runtime-daemon-worker-origin-fallback-'));
+  const laneId = 'origin-1826';
+  const slotId = 'worker-slot-1';
+  const { checkoutPath } = compareviRuntimeTest.resolveCompareviWorkerCheckoutPath({
+    repoRoot,
+    repository: 'example/repo',
+    laneId,
+    slotId,
+    storageRootsPolicy: REPO_LOCAL_STORAGE_ROOTS_POLICY
+  });
+  const worktreeAdminDir = path.join(repoRoot, '.git', 'worktrees', slotId);
+  const calls = [];
+
+  t.after(async () => {
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  const prepared = await compareviRuntimeTest.prepareCompareviWorkerCheckout({
+    repoRoot,
+    repository: 'example/repo',
+    schedulerDecision: {
+      activeLane: {
+        laneId
+      },
+      stepOptions: {}
+    },
+    deps: {
+      loadDeliveryAgentPolicyFn: makeRepoLocalDeliveryPolicyFn(),
+      platform: 'linux',
+      execFileFn: async (command, args, options) => {
+        calls.push({ command, args, options });
+        if (command !== 'git') {
+          throw new Error(`unexpected command: ${command}`);
+        }
+        if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') {
+          return { stdout: '.git\n', stderr: '' };
+        }
+        if (args[0] === 'remote') {
+          if (args[1] === 'get-url' && args[2] === 'origin') {
+            return { stdout: 'https://github.com/example/repo-fork\n', stderr: '' };
+          }
+          if (args[1] === 'get-url' && args[2] === '--push' && args[3] === 'origin') {
+            return { stdout: 'https://github.com/example/repo-fork\n', stderr: '' };
+          }
+          if (args[1] === 'set-url' && args[2] === '--push' && args[3] === 'origin') {
+            return { stdout: '', stderr: '' };
+          }
+          return { stdout: 'origin\n', stderr: '' };
+        }
+        if (args[0] === 'fetch' && args[1] === 'origin' && args[2] === '--prune') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === '--quiet') {
+          if (args[3] === 'origin/develop^{commit}') {
+            return { stdout: '0123456789abcdef\n', stderr: '' };
+          }
+          const error = new Error(`unknown ref ${args[3]}`);
+          error.code = 1;
+          throw error;
+        }
+        if (args[0] === 'worktree' && args[1] === 'add' && args[2] === '--detach') {
+          await mkdir(checkoutPath, { recursive: true });
+          await mkdir(worktreeAdminDir, { recursive: true });
+          await writeFile(path.join(checkoutPath, '.git'), `gitdir: /mnt/c/mock/.git/worktrees/${slotId}\n`, 'utf8');
+          await writeFile(path.join(worktreeAdminDir, 'gitdir'), `/mnt/c/mock/.runtime-worktrees/example-repo/${slotId}/.git\n`, 'utf8');
+          return { stdout: '', stderr: '' };
+        }
+        throw new Error(`unexpected git args: ${args.join(' ')}`);
+      }
+    }
+  });
+
+  assert.equal(prepared.status, 'created');
+  assert.equal(prepared.ref, 'origin/develop');
+  assert.deepEqual(prepared.fetchedRemotes, ['origin']);
+  assert.ok(
+    calls.some(
+      (entry) =>
+        entry.command === 'git' &&
+        entry.args[0] === 'worktree' &&
+        entry.args[1] === 'add' &&
+        entry.args[4] === 'origin/develop'
+    )
+  );
+});
+
 test('comparevi worker checkout allocator skips local checkout for hosted waiting-state providers', async () => {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'runtime-daemon-worker-hosted-provider-'));
   const prepared = await compareviRuntimeTest.prepareCompareviWorkerCheckout({
@@ -503,12 +590,15 @@ test('comparevi worker checkout allocator skips local checkout for hosted waitin
 test('comparevi worker checkout allocator quarantines stale runtime drift before recreating a lane worktree', async () => {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'runtime-daemon-worker-repair-'));
   const laneId = 'origin-959';
+  const slotId = 'worker-slot-1';
   const { checkoutPath } = compareviRuntimeTest.resolveCompareviWorkerCheckoutPath({
     repoRoot,
     repository: 'example/repo',
-    laneId
+    laneId,
+    slotId,
+    storageRootsPolicy: REPO_LOCAL_STORAGE_ROOTS_POLICY
   });
-  const worktreeAdminDir = path.join(repoRoot, '.git', 'worktrees', laneId);
+  const worktreeAdminDir = path.join(repoRoot, '.git', 'worktrees', slotId);
   await mkdir(checkoutPath, { recursive: true });
   await mkdir(worktreeAdminDir, { recursive: true });
   await writeFile(path.join(checkoutPath, '.git'), 'gitdir: C:/stale/windows/path\n', 'utf8');
@@ -525,6 +615,7 @@ test('comparevi worker checkout allocator quarantines stale runtime drift before
       stepOptions: {}
     },
     deps: {
+      loadDeliveryAgentPolicyFn: makeRepoLocalDeliveryPolicyFn(),
       platform: 'linux',
       execFileFn: async (command, args, options) => {
         calls.push({ command, args, options });
@@ -551,6 +642,17 @@ test('comparevi worker checkout allocator quarantines stale runtime drift before
         }
         if (args[0] === 'fetch' && args[1] === 'upstream' && args[2] === '--prune') {
           return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'fetch' && args[1] === 'origin' && args[2] === '--prune') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === '--quiet') {
+          if (args[3] === 'upstream/develop^{commit}') {
+            return { stdout: '0123456789abcdef\n', stderr: '' };
+          }
+          const error = new Error(`unknown ref ${args[3]}`);
+          error.code = 1;
+          throw error;
         }
         if (args[0] === 'worktree' && args[1] === 'remove' && args[2] === '--force') {
           return { stdout: '', stderr: '' };
@@ -602,7 +704,8 @@ test('comparevi worker checkout allocator rewrites new WSL worktree pointers int
     repoRoot,
     repository: 'example/repo',
     laneId,
-    slotId
+    slotId,
+    storageRootsPolicy: REPO_LOCAL_STORAGE_ROOTS_POLICY
   });
   const worktreeAdminDir = path.join(repoRoot, '.git', 'worktrees', slotId);
 
@@ -616,6 +719,7 @@ test('comparevi worker checkout allocator rewrites new WSL worktree pointers int
       stepOptions: {}
     },
     deps: {
+      loadDeliveryAgentPolicyFn: makeRepoLocalDeliveryPolicyFn(),
       platform: 'linux',
       execFileFn: async (command, args, options) => {
         if (command !== 'git') {
@@ -642,6 +746,20 @@ test('comparevi worker checkout allocator rewrites new WSL worktree pointers int
             return { stdout: 'git@github.com:example/repo-fork.git\n', stderr: '' };
           }
           return { stdout: 'upstream\norigin\n', stderr: '' };
+        }
+        if (args[0] === 'fetch' && args[1] === 'upstream' && args[2] === '--prune') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'fetch' && args[1] === 'origin' && args[2] === '--prune') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === '--quiet') {
+          if (args[3] === 'upstream/develop^{commit}') {
+            return { stdout: '0123456789abcdef\n', stderr: '' };
+          }
+          const error = new Error(`unknown ref ${args[3]}`);
+          error.code = 1;
+          throw error;
         }
         throw new Error(`unexpected git args: ${args.join(' ')}`);
       }
@@ -1119,6 +1237,84 @@ test('comparevi worker activation attaches a ready checkout onto the determinist
   assert.equal(attached.trackingRef, 'personal/issue/personal-998-runtime-worker-branch-activation');
   assert.deepEqual(attached.fetchedRemotes, ['upstream', 'origin', 'personal']);
   assert.ok(calls.some((entry) => entry.command === 'git' && entry.args[0] === 'checkout' && entry.args.includes('--force')));
+});
+
+test('comparevi worker activation falls back to the prepared worker base ref when the tracking branch is missing', async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), 'runtime-daemon-worker-branch-origin-fallback-'));
+  const branch = 'issue/origin-1826-runtime-worker-ref';
+  const { checkoutPath } = compareviRuntimeTest.resolveCompareviWorkerCheckoutPath({
+    repoRoot,
+    repository: 'example/repo',
+    laneId: 'origin-1826'
+  });
+  await mkdir(checkoutPath, { recursive: true });
+  await writeFile(path.join(checkoutPath, '.git'), 'gitdir: mocked\n', 'utf8');
+
+  const calls = [];
+  const attached = await compareviRuntimeTest.activateCompareviWorkerLane({
+    schedulerDecision: {
+      activeLane: {
+        laneId: 'origin-1826',
+        forkRemote: 'origin',
+        branch
+      },
+      stepOptions: {
+        branch
+      }
+    },
+    preparedWorker: {
+      checkoutPath,
+      ref: 'origin/develop'
+    },
+    workerReady: {
+      readyAt: '2026-03-22T19:00:00.000Z',
+      checkoutPath
+    },
+    deps: {
+      loadBranchClassContractFn: () => makeRuntimeBranchContract(),
+      execFileFn: async (command, args, options) => {
+        calls.push({ command, args, options });
+        if (command !== 'git') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'remote') {
+          return { stdout: 'origin\n', stderr: '' };
+        }
+        if (args[0] === 'fetch' && args[1] === 'origin' && args[2] === '--prune') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'branch' && args[1] === '--show-current') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'show-ref' && args[1] === '--verify' && args[2] === '--quiet') {
+          const error = new Error(`missing ref ${args[3]}`);
+          error.code = 1;
+          throw error;
+        }
+        if (args[0] === 'checkout' && args[1] === '--force' && args[2] === '-B') {
+          assert.equal(args[3], branch);
+          assert.equal(args[4], 'origin/develop');
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      }
+    }
+  });
+
+  assert.equal(attached.status, 'created');
+  assert.equal(attached.baseRef, 'origin/develop');
+  assert.equal(attached.trackingRef, null);
+  assert.deepEqual(attached.fetchedRemotes, ['origin']);
+  assert.ok(
+    calls.some(
+      (entry) =>
+        entry.command === 'git' &&
+        entry.args[0] === 'checkout' &&
+        entry.args[1] === '--force' &&
+        entry.args[2] === '-B' &&
+        entry.args[4] === 'origin/develop'
+    )
+  );
 });
 
 test('comparevi worker activation fails closed when the branch prefix conflicts with the fork plane contract', async () => {
