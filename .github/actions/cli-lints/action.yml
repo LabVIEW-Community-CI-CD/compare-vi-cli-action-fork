@@ -28,15 +28,18 @@ runs:
     - name: Cache actionlint
       uses: actions/cache@v5
       with:
-        path: ./bin/actionlint
+        path: ./bin
         key: actionlint-${{ inputs.actionlint-version }}-${{ runner.os }}
 
-    - name: Install actionlint
-      if: ${{ !hashFiles('./bin/actionlint') }}
+    - name: Ensure actionlint
       shell: bash
       run: |
         mkdir -p ./bin
-        curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- ${{ inputs.actionlint-version }} ./bin
+        if [ ! -x ./bin/actionlint ]; then
+          curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- ${{ inputs.actionlint-version }} ./bin
+        fi
+        chmod +x ./bin/actionlint
+        ./bin/actionlint -version
 
     - name: Run actionlint
       shell: bash
@@ -86,5 +89,4 @@ runs:
           } else { $lines += '- docs links: skipped' }
           $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
         }
-
 
