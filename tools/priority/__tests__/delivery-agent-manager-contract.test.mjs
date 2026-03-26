@@ -42,12 +42,20 @@ async function makeLinkedWorktree(prefix) {
   return { sandboxRoot, repoDir, worktreeDir };
 }
 
-async function writeFakeDeliveryAgentBuildScript(tempRoot) {
+async function writeFakeDeliveryAgentBuildScript(tempRoot, statusPayload = null) {
   const scriptPath = path.join(tempRoot, 'tools', 'npm', 'run-script.mjs');
   await mkdir(path.dirname(scriptPath), { recursive: true });
-  await writeFile(
-    scriptPath,
-    `#!/usr/bin/env node
+  const payloadExpression = statusPayload === null
+    ? "({ schema: 'test/delivery-agent@v1', command, reportPath })"
+    : JSON.stringify(statusPayload);
+  const deliveryAgentSource = `#!/usr/bin/env node
+const command = process.argv[2] || '';
+const reportPathIndex = process.argv.indexOf('--report-path');
+const reportPath = reportPathIndex >= 0 ? process.argv[reportPathIndex + 1] : null;
+const payload = ${payloadExpression};
+process.stdout.write(JSON.stringify(payload, null, 2) + '\\n');
+`;
+  const runnerScriptSource = `#!/usr/bin/env node
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,14 +67,13 @@ const distDir = path.join(repoRoot, 'dist', 'tools', 'priority');
 mkdirSync(distDir, { recursive: true });
 writeFileSync(
   path.join(distDir, 'delivery-agent.js'),
-  "#!/usr/bin/env node\\n" +
-    "const command = process.argv[2] || '';\\n" +
-    "const reportPathIndex = process.argv.indexOf('--report-path');\\n" +
-    "const reportPath = reportPathIndex >= 0 ? process.argv[reportPathIndex + 1] : null;\\n" +
-    "process.stdout.write(JSON.stringify({ schema: 'test/delivery-agent@v1', command, reportPath }, null, 2) + '\\\\n');\\n",
+  ${JSON.stringify(deliveryAgentSource)},
   'utf8',
 );
-`,
+`;
+  await writeFile(
+    scriptPath,
+    runnerScriptSource,
     'utf8',
   );
 }
@@ -386,7 +393,24 @@ test('Manage-UnattendedDeliveryAgent suppresses fallback build chatter before JS
   assert.deepEqual(JSON.parse(stdout), {
     schema: 'test/delivery-agent@v1',
     command: 'status',
-    reportPath: null
+    reportPath: null,
+    managerStatusSummary: {
+      hostSignal: {
+        status: null,
+        provider: null
+      },
+      hostIsolation: {
+        lastEvent: null
+      },
+      runnerServices: {
+        activeCount: 0,
+        activeNames: []
+      },
+      cutoverReadiness: {
+        status: 'unknown',
+        summary: 'cutover readiness unknown: host signal is missing'
+      }
+    }
   });
 });
 
@@ -1007,6 +1031,84 @@ test('delivery-agent manager status emits bounded log-tail trace events for daem
   assert.match(traceText, /"source":"manager-stdout"/);
   assert.match(traceText, /"source":"manager-stderr"/);
   assert.match(traceText, /"reason":"status:status"/);
+});
+
+test('delivery-agent manager status surfaces daemon cutover readiness and runner-service isolation summary', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'delivery-agent-wrapper-cutover-summary-'));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  await copyRepoFile('tools/priority/Manage-UnattendedDeliveryAgent.ps1', tempRoot);
+  await copyRepoFile('tools/priority/DeliveryAgentWrapper.Build.psm1', tempRoot);
+  await writeFakeDeliveryAgentBuildScript(tempRoot, {
+    schema: 'test/delivery-agent@v1',
+    command: 'status',
+    reportPath: null,
+    hostSignal: {
+      status: 'desktop-backed',
+      provider: 'desktop',
+      runnerServices: {
+        running: [
+          'actions.runner.compare-vi-cli-action.1',
+          'actions.runner.compare-vi-cli-action.2'
+        ],
+        stopped: ['actions.runner.compare-vi-cli-action.old']
+      }
+    },
+    hostIsolation: {
+      lastEvent: {
+        schema: 'priority/delivery-agent-host-isolation-event@v1',
+        type: 'runner-conflict-isolated',
+        generatedAt: '2026-03-21T12:00:00.000Z'
+      }
+    }
+  });
+
+  const { stdout, stderr } = await execFile(
+    'pwsh',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-File',
+      path.join(tempRoot, 'tools', 'priority', 'Manage-UnattendedDeliveryAgent.ps1'),
+      '-Status',
+      '-RuntimeDir',
+      'tests/results/_agent/runtime'
+    ],
+    {
+      cwd: tempRoot,
+      windowsHide: true
+    }
+  );
+
+  assert.equal(stderr, '');
+  const report = JSON.parse(stdout);
+  assert.deepEqual(report.hostSignal, {
+    status: 'desktop-backed',
+    provider: 'desktop',
+    runnerServices: {
+      running: [
+        'actions.runner.compare-vi-cli-action.1',
+        'actions.runner.compare-vi-cli-action.2'
+      ],
+      stopped: ['actions.runner.compare-vi-cli-action.old']
+    }
+  });
+  assert.equal(report.hostIsolation.lastEvent.type, 'runner-conflict-isolated');
+  assert.equal(report.managerStatusSummary.hostSignal.status, 'desktop-backed');
+  assert.equal(report.managerStatusSummary.hostSignal.provider, 'desktop');
+  assert.equal(report.managerStatusSummary.hostIsolation.lastEvent.type, 'runner-conflict-isolated');
+  assert.equal(report.managerStatusSummary.runnerServices.activeCount, 2);
+  assert.deepEqual(report.managerStatusSummary.runnerServices.activeNames, [
+    'actions.runner.compare-vi-cli-action.1',
+    'actions.runner.compare-vi-cli-action.2'
+  ]);
+  assert.equal(report.managerStatusSummary.cutoverReadiness.status, 'runner-conflict');
+  assert.equal(
+    report.managerStatusSummary.cutoverReadiness.summary,
+    'runner conflict: 2 actions.runner.* services still active; cutover required: host still desktop-backed'
+  );
 });
 
 test('Manage-UnattendedDeliveryAgent.ps1 remains a thin wrapper around the JS delivery-agent implementation', async () => {
